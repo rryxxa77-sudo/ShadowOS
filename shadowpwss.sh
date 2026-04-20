@@ -2,7 +2,6 @@
 set -e
 
 # --- Core Setup ---
-# Gum is needed for the UI. If it fails to install, we can't run.
 [[ ! -f /usr/bin/gum ]] && pacman -Sy --noconfirm gum reflector
 ui_header() { clear; gum style --foreground 39 --border double --margin "1 1" --padding "1 2" "SHADOWOS: $1"; }
 sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 15/' /etc/pacman.conf
@@ -22,11 +21,14 @@ loadkeys "$KEYMAP"
 LOCALE=$(grep "UTF-8" /etc/locale.gen | sed 's/^#//' | awk '{print $1}' | gum filter)
 TIMEZONE=$(timedatectl list-timezones | gum filter)
 
-# --- 3. Storage & Optional Encryption ---
+# --- 3. Storage & Memory Selection ---
 ui_header "Storage"
 DEVICE=$(lsblk -dno NAME,SIZE,MODEL | gum filter | awk '{print "/dev/"$1}')
 FS_TYPE=$(gum choose "btrfs" "f2fs" "ext4")
 MODE=$(gum choose "Wipe (2GB EFI)" "Manual (cfdisk)" "Replace Partition")
+
+# Swap is required for Hibernation.
+SWAP_CHOICE=$(gum choose "Both (zRAM + 4GB Swap + Hibernation)" "zRAM Only" "Swap Only (Hibernation Ready)" "None")
 
 ENCRYPT=false
 if gum confirm "Enable LUKS2 Disk Encryption?"; then
@@ -42,28 +44,22 @@ KERNEL_LIST=$(echo "$KERNELS" | tr '\n' ' ')
 
 # --- 5. App Suite ---
 APPS="steam power-profiles-daemon atlauncher-bin faugus-launcher hytale-launcher-bin mangohud protontricks obsidian-bin discord flatpak bazaar spotify lact-git micro fresh fastfetch zen-browser-bin vacuumtube krita-git goverlay heroic-games-launcher-bin protonplus kitty popsicle onlyoffice-bin gpu-screen-recorder-ui-git shelly-bin kate gparted networkmanager"
-[[ $(gum confirm "Use shadow-x8664 domain?") ]] && HOSTNAME="$HOSTNAME.shadow-x8664"
 
 # --- Execution ---
 clear
 gum style --foreground 196 "INITIALIZING INSTALL ON $DEVICE"
 gum confirm "Proceed?" || exit 1
 
-# --- FIXED Partition Naming Logic ---
+# --- Partition Naming ---
 if [[ "$MODE" == "Wipe (2GB EFI)" ]]; then
     sgdisk -Z "$DEVICE"
     sgdisk -n 1:0:+2G -t 1:ef00 "$DEVICE"
     sgdisk -n 2:0:0 -t 2:8304 "$DEVICE"
-    
-    partprobe "$DEVICE"
-    sleep 2
-
+    partprobe "$DEVICE" && sleep 2
     if [[ "$DEVICE" == *"nvme"* ]] || [[ "$DEVICE" == *"mmcblk"* ]]; then
-        P1="${DEVICE}p1"
-        P2="${DEVICE}p2"
+        P1="${DEVICE}p1"; P2="${DEVICE}p2"
     else
-        P1="${DEVICE}1"
-        P2="${DEVICE}2"
+        P1="${DEVICE}1"; P2="${DEVICE}2"
     fi
 else
     P2=$(gum input --placeholder "Root Partition Path")
@@ -86,11 +82,11 @@ if [[ "$FS_TYPE" == "btrfs" ]]; then
     mount "$REAL_ROOT" /mnt
     btrfs subvolume create /mnt/@
     btrfs subvolume create /mnt/@home
-    btrfs subvolume create /mnt/@swap
+    [[ "$SWAP_CHOICE" == *"Swap"* ]] && btrfs subvolume create /mnt/@swap
     umount /mnt
     mount -o subvol=@ "$REAL_ROOT" /mnt
-    mkdir -p /mnt/{home,boot,swap}
-    mount -o subvol=@swap "$REAL_ROOT" /mnt/swap
+    mkdir -p /mnt/{home,boot}
+    [[ "$SWAP_CHOICE" == *"Swap"* ]] && mkdir -p /mnt/swap && mount -o subvol=@swap "$REAL_ROOT" /mnt/swap
     mount -o subvol=@home "$REAL_ROOT" /mnt/home
 else
     mkfs.$FS_TYPE -F "$REAL_ROOT"
@@ -103,13 +99,6 @@ mount "$P1" /mnt/boot
 pacstrap /mnt base base-devel linux-firmware git fish sudo networkmanager btrfs-progs
 genfstab -U /mnt >> /mnt/etc/fstab
 
-# FSTAB Optimizations
-if [[ "$FS_TYPE" == "btrfs" ]]; then
-    sed -i 's/relatime/noatime,compress=zstd:3/g' /mnt/etc/fstab
-else
-    sed -i 's/relatime/noatime/g' /mnt/etc/fstab
-fi
-
 arch-chroot /mnt /bin/bash <<EOF
     set -e
     sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 15/' /etc/pacman.conf
@@ -119,80 +108,87 @@ arch-chroot /mnt /bin/bash <<EOF
     echo "$LOCALE UTF-8" >> /etc/locale.gen && locale-gen
     echo "LANG=$LOCALE" > /etc/locale.conf && echo "$HOSTNAME" > /etc/hostname
 
-    # --- REPLACED CURL WITH DIRECT REPO CONFIG ---
-    # We add the CachyOS key and repo manually to avoid the 404 curl error
-    pacman-key --recv-keys F3B607488DB35A47 --keyserver keyserver.ubuntu.com
-    pacman-key --lsign-key F3B607488DB35A47
-    pacman -U --noconfirm https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-keyring-20240331-1-any.pkg.tar.zst \
-                          https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-mirrorlist-18-1-any.pkg.tar.zst \
-                          https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-v3-mirrorlist-18-1-any.pkg.tar.zst
+    # --- CACHYOS REPO ---
+    curl -O https://mirror.cachyos.org/cachyos-repo.sh
+    chmod +x cachyos-repo.sh
+    ./cachyos-repo.sh
     
-    echo -e "\n[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist" >> /etc/pacman.conf
     pacman -Syy --noconfirm --needed yay chwd zram-generator $KERNEL_LIST
 
-    # --- SWAP & zRAM ---
-    if [[ "$FS_TYPE" == "btrfs" ]]; then
-        truncate -s 0 /swap/swapfile
-        chattr +C /swap/swapfile
-        btrfs property set /swap/swapfile compression none
-        dd if=/dev/zero of=/swap/swapfile bs=1M count=4096 status=progress
-        chmod 600 /swap/swapfile && mkswap /swap/swapfile && swapon /swap/swapfile
-        echo "/swap/swapfile none swap defaults 0 0" >> /etc/fstab
-    else
-        dd if=/dev/zero of=/swapfile bs=1M count=4096 status=progress
-        chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
-        echo "/swapfile none swap defaults 0 0" >> /etc/fstab
+    # --- SWAP & zRAM (Hibernation Logic) ---
+    if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
+        if [[ "$FS_TYPE" == "btrfs" ]]; then
+            truncate -s 0 /swap/swapfile
+            chattr +C /swap/swapfile
+            btrfs property set /swap/swapfile compression none
+            dd if=/dev/zero of=/swap/swapfile bs=1M count=4096 status=progress
+            chmod 600 /swap/swapfile && mkswap /swap/swapfile && swapon /swap/swapfile
+            echo "/swap/swapfile none swap defaults 0 0" >> /etc/fstab
+        else
+            dd if=/dev/zero of=/swapfile bs=1M count=4096 status=progress
+            chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+            echo "/swapfile none swap defaults 0 0" >> /etc/fstab
+        fi
     fi
 
-    echo -e "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd" > /etc/systemd/zram-generator.conf
+    if [[ "$SWAP_CHOICE" == *"zRAM"* ]]; then
+        echo -e "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd" > /etc/systemd/zram-generator.conf
+    fi
 
-    # Dynamic Initramfs
+    # --- INITRAMFS WITH RESUME HOOK ---
     if [ "$ENCRYPT" = true ]; then
         NEW_HOOKS="base systemd autodetect modconf sd-vconsole sd-keyboard block sd-encrypt filesystems"
     else
         NEW_HOOKS="base udev autodetect modconf block filesystems keyboard fsck"
     fi
-    NEW_HOOKS=\$(echo \$NEW_HOOKS | sed 's/block/block resume/')
+    
+    # Hibernation needs the 'resume' hook
+    if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
+        NEW_HOOKS=\$(echo \$NEW_HOOKS | sed 's/block/block resume/')
+    fi
+    
     [[ "$FS_TYPE" == "btrfs" ]] && NEW_HOOKS="\${NEW_HOOKS} btrfs"
     sed -i "s/^HOOKS=(.*)/HOOKS=(\$NEW_HOOKS)/" /etc/mkinitcpio.conf
     mkinitcpio -P
 
-    # User Setup
     useradd -m -G wheel -s /usr/bin/fish $USERNAME
     echo "$USERNAME:$PASS" | chpasswd
     echo "root:$ROOT_PASS" | chpasswd
     echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/10-shadow
 
-    # Hardware Detection & App Loop
     chwd -a
     for pkg in $APPS; do
         sudo -u $USERNAME bash -c "export HOME=/home/$USERNAME && yay -S --noconfirm --needed \$pkg" || echo "Failed: \$pkg"
     done
 
-    # Bootloader
+    # --- BOOTLOADER & KERNEL PARAMETERS ---
     MAIN_KERN=\$(echo $KERNEL_LIST | awk '{print \$1}')
     bootctl install
-
+    
     if [ "$ENCRYPT" = true ]; then
         OPTIONS="rd.luks.name=\$(blkid -s UUID -o value $P2)=cryptroot root=/dev/mapper/cryptroot"
         RESUME_DEV="/dev/mapper/cryptroot"
     else
         OPTIONS="root=PARTUUID=\$(blkid -s PARTUUID -o value $P2)"
-        RESUME_DEV="$REAL_ROOT"
+        RESUME_DEV="\$REAL_ROOT"
     fi
 
-    if [[ "$FS_TYPE" == "btrfs" ]]; then
-        OFFSET=\$(btrfs inspect-internal map-swapfile -r /swap/swapfile | awk '{print \$4}')
-        OPTIONS="\$OPTIONS resume=\$RESUME_DEV resume_offset=\$OFFSET"
-    else
-        OPTIONS="\$OPTIONS resume=\$RESUME_DEV"
+    # Calculate Resume Offset for Btrfs Hibernation
+    if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
+        if [[ "$FS_TYPE" == "btrfs" ]]; then
+            OFFSET=\$(btrfs inspect-internal map-swapfile -r /swap/swapfile | awk '{print \$4}')
+            OPTIONS="\$OPTIONS resume=\$RESUME_DEV resume_offset=\$OFFSET"
+        else
+            OPTIONS="\$OPTIONS resume=\$RESUME_DEV"
+        fi
     fi
 
     [[ "$FS_TYPE" == "btrfs" ]] && OPTIONS="\$OPTIONS rootflags=subvol=@"
     echo -e "default arch.conf\ntimeout 3\nconsole-mode max" > /boot/loader/loader.conf
     echo -e "title ShadowOS\nlinux /vmlinuz-\$MAIN_KERN\ninitrd /initramfs-\$MAIN_KERN.img\noptions \$OPTIONS rw" > /boot/loader/entries/arch.conf
 
-    systemctl enable NetworkManager power-profiles-daemon fstrim.timer
+    systemctl enable NetworkManager power-profiles-daemon
+    # TRIM is NOT enabled here by request.
     sed -i 's/NOPASSWD: //' /etc/sudoers.d/10-shadow
 EOF
 
