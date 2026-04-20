@@ -2,6 +2,10 @@
 set -e
 
 # --- Core Setup ---
+#!/bin/bash
+set -e
+
+# --- Core Setup ---
 [[ ! -f /usr/bin/gum ]] && pacman -Sy --noconfirm gum reflector
 ui_header() { clear; gum style --foreground 39 --border double --margin "1 1" --padding "1 2" "SHADOWOS: $1"; }
 sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 15/' /etc/pacman.conf
@@ -36,18 +40,17 @@ DE_CHOICE=$(gum choose "KDE Plasma" "GNOME" "Cinnamon" "LXQt" "None (CLI)")
 ui_header "Mirror Optimization"
 reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
 
-ui_header "Kernel Selection"
-KERNELS=$(gum choose --no-limit --header "Select Kernels" "linux-zen" "linux" "linux-lts")
-KERNEL_LIST=$(echo "$KERNELS" | tr '\n' ' ')
+# --- 6. The Master App List (ALL via YAY) ---
+# We only use pacstrap for the bare essentials to boot.
+CORE_PKGS="base base-devel linux-firmware git fish sudo networkmanager btrfs-progs"
 
-# --- 6. The Master App List ---
-REPO_APPS="steam power-profiles-daemon mangohud protontricks discord flatpak spotify micro fastfetch kitty popsicle gparted networkmanager"
-AUR_APPS="atlauncher-bin faugus-launcher hytale-launcher-bin obsidian-bin bazaar zen-browser-bin vacuumtube krita-git goverlay heroic-games-launcher-bin protonplus onlyoffice-bin shelly-bin lact-git fresh"
+# This entire list will be handled by Yay to avoid "Target Not Found"
+ALL_APPS="linux-fsync-nobara-bin steam power-profiles-daemon mangohud protontricks discord flatpak bazaar spotify micro fastfetch kitty popsicle gparted atlauncher-bin faugus-launcher hytale-launcher-bin obsidian-bin zen-browser-bin vacuumtube krita-git goverlay heroic-games-launcher-bin protonplus onlyoffice-bin shelly-bin lact-git fresh kate"
 
 # --- Execution ---
 clear
-gum style --foreground 196 "STARTING FULL INSTALL ON $DEVICE"
-gum confirm "Proceed?" || exit 1
+gum style --foreground 196 "CLEAN INSTALLING SHADOWOS ON $DEVICE"
+gum confirm "Start Installation?" || exit 1
 
 # --- Partitioning ---
 if [[ "$MODE" == "Wipe (2GB EFI)" ]]; then
@@ -67,7 +70,7 @@ else
     P2=$(gum input --placeholder "Enter Root Partition Path")
 fi
 
-# Formatting & Mounts
+# Formatting
 mkfs.fat -F32 "$P1"
 if [[ "$FS_TYPE" == "btrfs" ]]; then
     mkfs.btrfs -f "$P2"
@@ -87,8 +90,8 @@ else
 fi
 mount "$P1" /mnt/boot
 
-# Base Install
-pacstrap /mnt base base-devel linux-firmware git fish sudo networkmanager btrfs-progs $KERNEL_LIST $REPO_APPS
+# --- Base Pacstrap (Essentials Only) ---
+pacstrap /mnt $CORE_PKGS
 genfstab -U /mnt >> /mnt/etc/fstab
 
 arch-chroot /mnt /bin/bash <<EOF
@@ -100,21 +103,31 @@ arch-chroot /mnt /bin/bash <<EOF
     echo "$LOCALE UTF-8" >> /etc/locale.gen && locale-gen
     echo "LANG=$LOCALE" > /etc/locale.conf && echo "$HOSTNAME" > /etc/hostname
 
-    # Desktop Setup
+    # Setup User Early (Needed for Yay)
+    useradd -m -G wheel -s /usr/bin/fish $USERNAME
+    echo "$USERNAME:$PASS" | chpasswd
+    echo "root:$ROOT_PASS" | chpasswd
+    echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/10-shadow
+
+    # Desktop Environment
     case "$DE_CHOICE" in
-        "KDE Plasma") pacman -S --noconfirm plasma-desktop sddm konsole dolphin kate ;;
+        "KDE Plasma") pacman -S --noconfirm plasma-desktop sddm konsole dolphin ;;
         "GNOME") pacman -S --noconfirm gnome gnome-tweaks ;;
-        "Cinnamon") pacman -S --noconfirm cinnamon lightdm lightdm-gtk-greeter kate ;;
+        "Cinnamon") pacman -S --noconfirm cinnamon lightdm lightdm-gtk-greeter ;;
         "LXQt") pacman -S --noconfirm lxqt sddm ;;
     esac
 
-    # Enable DM
+    # Enable Login Manager
     [[ "$DE_CHOICE" == "KDE Plasma" || "$DE_CHOICE" == "LXQt" ]] && systemctl enable sddm
     [[ "$DE_CHOICE" == "GNOME" ]] && systemctl enable gdm
     [[ "$DE_CHOICE" == "Cinnamon" ]] && systemctl enable lightdm
 
-    # Install Yay
+    # --- Install Yay ---
     sudo -u $USERNAME bash -c "cd /tmp && git clone https://aur.archlinux.org/yay-bin.git && cd yay-bin && makepkg -si --noconfirm"
+
+    # --- Install EVERYTHING else via Yay ---
+    # This includes the Nobara Kernel and all your apps
+    sudo -u $USERNAME yay -S --noconfirm --needed $ALL_APPS
 
     # Memory Setup
     if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
@@ -131,41 +144,39 @@ arch-chroot /mnt /bin/bash <<EOF
         fi
     fi
 
+    # zRAM
     if [[ "$SWAP_CHOICE" == *"zRAM"* ]]; then
         pacman -S --noconfirm zram-generator
         echo -e "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd" > /etc/systemd/zram-generator.conf
     fi
 
-    # AUR App Installation
-    for pkg in $AUR_APPS; do
-        sudo -u $USERNAME yay -S --noconfirm --needed \$pkg || echo "Failed: \$pkg"
-    done
-
-    # Power Profile Performance
-    systemctl enable power-profiles-daemon
-    echo "performance" > /sys/firmware/acpi/platform_profile || true
-
-    # Initramfs & Boot
+    # Initramfs for Nobara Kernel
     HOOKS="base udev autodetect modconf block filesystems keyboard fsck"
     [[ "$SWAP_CHOICE" == *"Swap"* ]] && HOOKS=\$(echo \$HOOKS | sed 's/block/block resume/')
     [[ "$FS_TYPE" == "btrfs" ]] && HOOKS="\$HOOKS btrfs"
     sed -i "s/^HOOKS=(.*)/HOOKS=(\$HOOKS)/" /etc/mkinitcpio.conf
-    mkinitcpio -P
+    mkinitcpio -p linux-fsync-nobara-bin
 
-    useradd -m -G wheel -s /usr/bin/fish $USERNAME
-    echo "$USERNAME:$PASS" | chpasswd
-    echo "root:$ROOT_PASS" | chpasswd
-    echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/10-shadow
-
+    # Bootloader Setup
     bootctl install
-    MAIN_KERN=\$(echo $KERNEL_LIST | awk '{print \$1}')
     OPTIONS="root=PARTUUID=\$(blkid -s PARTUUID -o value $P2) rw"
+    
+    if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
+        if [[ "$FS_TYPE" == "btrfs" ]]; then
+            OFFSET=\$(btrfs inspect-internal map-swapfile -r /swap/swapfile | awk '{print \$4}')
+            OPTIONS="\$OPTIONS resume=$P2 resume_offset=\$OFFSET"
+        else
+            OPTIONS="\$OPTIONS resume=$P2"
+        fi
+    fi
     [[ "$FS_TYPE" == "btrfs" ]] && OPTIONS="\$OPTIONS rootflags=subvol=@"
-    echo -e "default arch.conf\ntimeout 3\nconsole-mode max" > /boot/loader/loader.conf
-    echo -e "title ShadowOS\nlinux /vmlinuz-\$MAIN_KERN\ninitrd /initramfs-\$MAIN_KERN.img\noptions \$OPTIONS" > /boot/loader/entries/arch.conf
 
-    systemctl enable NetworkManager
+    echo -e "default arch.conf\ntimeout 3\nconsole-mode max" > /boot/loader/loader.conf
+    echo -e "title ShadowOS (Nobara)\nlinux /vmlinuz-linux-fsync-nobara-bin\ninitrd /initramfs-linux-fsync-nobara-bin.img\noptions \$OPTIONS" > /boot/loader/entries/arch.conf
+
+    # System Services
+    systemctl enable NetworkManager power-profiles-daemon
     sed -i 's/NOPASSWD: //' /etc/sudoers.d/10-shadow
 EOF
 
-ui_header "Installation Complete! Rebooting now."
+ui_header "Nobara-Powered ShadowOS Ready!"
