@@ -8,7 +8,7 @@ sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 15/' /etc/pacman.conf
 
 # --- 1. Identity ---
 ui_header "Identity"
-HOSTNAME=$(gum input --placeholder "Hostname")
+HOSTNAME="shadow" # Hardcoded per request
 USERNAME=$(gum input --placeholder "Username")
 PASS=$(gum input --password --placeholder "Password")
 ROOT_PASS=$(gum input --password --placeholder "Root Password (blank to sync)")
@@ -26,8 +26,6 @@ ui_header "Storage"
 DEVICE=$(lsblk -dno NAME,SIZE,MODEL | gum filter | awk '{print "/dev/"$1}')
 FS_TYPE=$(gum choose "btrfs" "f2fs" "ext4")
 MODE=$(gum choose "Wipe (2GB EFI)" "Manual (cfdisk)" "Replace Partition")
-
-# Swap is required for Hibernation.
 SWAP_CHOICE=$(gum choose "Both (zRAM + 4GB Swap + Hibernation)" "zRAM Only" "Swap Only (Hibernation Ready)" "None")
 
 ENCRYPT=false
@@ -108,14 +106,17 @@ arch-chroot /mnt /bin/bash <<EOF
     echo "$LOCALE UTF-8" >> /etc/locale.gen && locale-gen
     echo "LANG=$LOCALE" > /etc/locale.conf && echo "$HOSTNAME" > /etc/hostname
 
-    # --- CACHYOS REPO ---
-    curl -O https://mirror.cachyos.org/cachyos-repo.sh
-    chmod +x cachyos-repo.sh
-    ./cachyos-repo.sh
+    # --- STABLE CACHYOS REPO SETUP ---
+    # Manually adding the keyring to avoid script download failures
+    pacman-key --recv-keys F3B607488DB35A47 --keyserver keyserver.ubuntu.com || pacman-key --recv-keys F3B607488DB35A47 --keyserver hkps://keys.openpgp.org
+    pacman-key --lsign-key F3B607488DB35A47
+    pacman -U --noconfirm https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-keyring-20240331-1-any.pkg.tar.zst \
+                          https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-mirrorlist-18-1-any.pkg.tar.zst
     
-    pacman -Syy --noconfirm --needed yay chwd zram-generator $KERNEL_LIST
+    echo -e "\n[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist" >> /etc/pacman.conf
+    pacman -Syy --noconfirm --needed yay chwd zram-generator \$KERNEL_LIST
 
-    # --- SWAP & zRAM (Hibernation Logic) ---
+    # --- SWAP & zRAM ---
     if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
         if [[ "$FS_TYPE" == "btrfs" ]]; then
             truncate -s 0 /swap/swapfile
@@ -135,18 +136,13 @@ arch-chroot /mnt /bin/bash <<EOF
         echo -e "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd" > /etc/systemd/zram-generator.conf
     fi
 
-    # --- INITRAMFS WITH RESUME HOOK ---
+    # --- INITRAMFS ---
     if [ "$ENCRYPT" = true ]; then
         NEW_HOOKS="base systemd autodetect modconf sd-vconsole sd-keyboard block sd-encrypt filesystems"
     else
         NEW_HOOKS="base udev autodetect modconf block filesystems keyboard fsck"
     fi
-    
-    # Hibernation needs the 'resume' hook
-    if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
-        NEW_HOOKS=\$(echo \$NEW_HOOKS | sed 's/block/block resume/')
-    fi
-    
+    [[ "$SWAP_CHOICE" == *"Swap"* ]] && NEW_HOOKS=\$(echo \$NEW_HOOKS | sed 's/block/block resume/')
     [[ "$FS_TYPE" == "btrfs" ]] && NEW_HOOKS="\${NEW_HOOKS} btrfs"
     sed -i "s/^HOOKS=(.*)/HOOKS=(\$NEW_HOOKS)/" /etc/mkinitcpio.conf
     mkinitcpio -P
@@ -157,23 +153,21 @@ arch-chroot /mnt /bin/bash <<EOF
     echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/10-shadow
 
     chwd -a
-    for pkg in $APPS; do
+    for pkg in \$APPS; do
         sudo -u $USERNAME bash -c "export HOME=/home/$USERNAME && yay -S --noconfirm --needed \$pkg" || echo "Failed: \$pkg"
     done
 
-    # --- BOOTLOADER & KERNEL PARAMETERS ---
+    # --- BOOTLOADER ---
     MAIN_KERN=\$(echo $KERNEL_LIST | awk '{print \$1}')
     bootctl install
-    
     if [ "$ENCRYPT" = true ]; then
         OPTIONS="rd.luks.name=\$(blkid -s UUID -o value $P2)=cryptroot root=/dev/mapper/cryptroot"
         RESUME_DEV="/dev/mapper/cryptroot"
     else
         OPTIONS="root=PARTUUID=\$(blkid -s PARTUUID -o value $P2)"
-        RESUME_DEV="\$REAL_ROOT"
+        RESUME_DEV="$REAL_ROOT"
     fi
 
-    # Calculate Resume Offset for Btrfs Hibernation
     if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
         if [[ "$FS_TYPE" == "btrfs" ]]; then
             OFFSET=\$(btrfs inspect-internal map-swapfile -r /swap/swapfile | awk '{print \$4}')
@@ -188,7 +182,6 @@ arch-chroot /mnt /bin/bash <<EOF
     echo -e "title ShadowOS\nlinux /vmlinuz-\$MAIN_KERN\ninitrd /initramfs-\$MAIN_KERN.img\noptions \$OPTIONS rw" > /boot/loader/entries/arch.conf
 
     systemctl enable NetworkManager power-profiles-daemon
-    # TRIM is NOT enabled here by request.
     sed -i 's/NOPASSWD: //' /etc/sudoers.d/10-shadow
 EOF
 
