@@ -8,7 +8,7 @@ sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 15/' /etc/pacman.conf
 
 # --- 1. Identity ---
 ui_header "Identity"
-HOSTNAME="shadow" # Hardcoded per request
+HOSTNAME="shadow"
 USERNAME=$(gum input --placeholder "Username")
 PASS=$(gum input --password --placeholder "Password")
 ROOT_PASS=$(gum input --password --placeholder "Root Password (blank to sync)")
@@ -21,34 +21,30 @@ loadkeys "$KEYMAP"
 LOCALE=$(grep "UTF-8" /etc/locale.gen | sed 's/^#//' | awk '{print $1}' | gum filter)
 TIMEZONE=$(timedatectl list-timezones | gum filter)
 
-# --- 3. Storage & Memory Selection ---
+# --- 3. Storage & Memory ---
 ui_header "Storage"
 DEVICE=$(lsblk -dno NAME,SIZE,MODEL | gum filter | awk '{print "/dev/"$1}')
 FS_TYPE=$(gum choose "btrfs" "f2fs" "ext4")
-MODE=$(gum choose "Wipe (2GB EFI)" "Manual (cfdisk)" "Replace Partition")
-SWAP_CHOICE=$(gum choose "Both (zRAM + 4GB Swap + Hibernation)" "zRAM Only" "Swap Only (Hibernation Ready)" "None")
+MODE=$(gum choose "Wipe (2GB EFI)" "Manual (cfdisk)")
+SWAP_CHOICE=$(gum choose "Both (zRAM + 4GB Swap + Hibernation)" "zRAM Only" "None")
 
-ENCRYPT=false
-if gum confirm "Enable LUKS2 Disk Encryption?"; then
-    ENCRYPT=true
-    ENC_PASS=$(gum input --password --placeholder "Encryption Passphrase")
-fi
+# --- 4. Performance ---
+ui_header "Mirror Optimization"
+reflector --latest 15 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
 
-# --- 4. Performance & Kernels ---
-ui_header "Performance"
-KERNELS=$(gum choose --no-limit --header "Select Kernels" "linux-fsync-nobara-bin" "linux-cachyos" "linux-zen" "linux")
+ui_header "Kernel Selection"
+KERNELS=$(gum choose --no-limit --header "Select Kernels" "linux-fsync-nobara-bin" "linux-cachyos" "linux-zen")
 KERNEL_LIST=$(echo "$KERNELS" | tr '\n' ' ')
-[[ $(gum confirm "Rate mirrors?") ]] && reflector --latest 20 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
 
 # --- 5. App Suite ---
-APPS="steam power-profiles-daemon atlauncher-bin faugus-launcher hytale-launcher-bin mangohud protontricks obsidian-bin discord flatpak bazaar spotify lact-git micro fresh fastfetch zen-browser-bin vacuumtube krita-git goverlay heroic-games-launcher-bin protonplus kitty popsicle onlyoffice-bin gpu-screen-recorder-ui-git shelly-bin kate gparted networkmanager"
+APPS="steam power-profiles-daemon mangohud protontricks obsidian-bin discord flatpak bazaar spotify lact-git micro fresh fastfetch zen-browser-bin vacuumtube krita-git goverlay heroic-games-launcher-bin protonplus kitty popsicle onlyoffice-bin gpu-screen-recorder-ui-git shelly-bin kate gparted networkmanager"
 
 # --- Execution ---
 clear
-gum style --foreground 196 "INITIALIZING INSTALL ON $DEVICE"
+gum style --foreground 196 "STARTING INSTALL ON $DEVICE"
 gum confirm "Proceed?" || exit 1
 
-# --- Partition Naming ---
+# --- Partitioning Logic ---
 if [[ "$MODE" == "Wipe (2GB EFI)" ]]; then
     sgdisk -Z "$DEVICE"
     sgdisk -n 1:0:+2G -t 1:ef00 "$DEVICE"
@@ -60,35 +56,27 @@ if [[ "$MODE" == "Wipe (2GB EFI)" ]]; then
         P1="${DEVICE}1"; P2="${DEVICE}2"
     fi
 else
-    P2=$(gum input --placeholder "Root Partition Path")
-    P1=$(gum input --placeholder "EFI Partition Path")
-fi
-
-# LUKS Setup
-if [ "$ENCRYPT" = true ]; then
-    echo -n "$ENC_PASS" | cryptsetup luksFormat "$P2" -
-    echo -n "$ENC_PASS" | cryptsetup open "$P2" cryptroot -
-    REAL_ROOT="/dev/mapper/cryptroot"
-else
-    REAL_ROOT="$P2"
+    cfdisk "$DEVICE"
+    P1=$(gum input --placeholder "Enter EFI Partition (e.g. /dev/nvme0n1p1)")
+    P2=$(gum input --placeholder "Enter Root Partition (e.g. /dev/nvme0n1p2)")
 fi
 
 # Formatting & Mounts
 mkfs.fat -F32 "$P1"
 if [[ "$FS_TYPE" == "btrfs" ]]; then
-    mkfs.btrfs -f "$REAL_ROOT"
-    mount "$REAL_ROOT" /mnt
+    mkfs.btrfs -f "$P2"
+    mount "$P2" /mnt
     btrfs subvolume create /mnt/@
     btrfs subvolume create /mnt/@home
     [[ "$SWAP_CHOICE" == *"Swap"* ]] && btrfs subvolume create /mnt/@swap
     umount /mnt
-    mount -o subvol=@ "$REAL_ROOT" /mnt
+    mount -o subvol=@,noatime,compress=zstd:3 "$P2" /mnt
     mkdir -p /mnt/{home,boot}
-    [[ "$SWAP_CHOICE" == *"Swap"* ]] && mkdir -p /mnt/swap && mount -o subvol=@swap "$REAL_ROOT" /mnt/swap
-    mount -o subvol=@home "$REAL_ROOT" /mnt/home
+    [[ "$SWAP_CHOICE" == *"Swap"* ]] && mkdir -p /mnt/swap && mount -o subvol=@swap,noatime "$P2" /mnt/swap
+    mount -o subvol=@home,noatime,compress=zstd:3 "$P2" /mnt/home
 else
-    mkfs.$FS_TYPE -F "$REAL_ROOT"
-    mount "$REAL_ROOT" /mnt
+    mkfs.$FS_TYPE -F "$P2"
+    mount "$P2" /mnt
     mkdir -p /mnt/boot
 fi
 mount "$P1" /mnt/boot
@@ -106,21 +94,20 @@ arch-chroot /mnt /bin/bash <<EOF
     echo "$LOCALE UTF-8" >> /etc/locale.gen && locale-gen
     echo "LANG=$LOCALE" > /etc/locale.conf && echo "$HOSTNAME" > /etc/hostname
 
-    # --- STABLE CACHYOS REPO SETUP ---
-    # Manually adding the keyring to avoid script download failures
-    pacman-key --recv-keys F3B607488DB35A47 --keyserver keyserver.ubuntu.com || pacman-key --recv-keys F3B607488DB35A47 --keyserver hkps://keys.openpgp.org
+    # --- RELIABLE CACHYOS REPO SETUP ---
+    # Fetching the keys and lists directly to avoid 404 script errors
+    pacman-key --recv-keys F3B607488DB35A47 --keyserver keyserver.ubuntu.com
     pacman-key --lsign-key F3B607488DB35A47
-    pacman -U --noconfirm https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-keyring-20240331-1-any.pkg.tar.zst \
-                          https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-mirrorlist-18-1-any.pkg.tar.zst
+    pacman -U --noconfirm https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-keyring-20240331-1-any.pkg.tar.zst
+    pacman -U --noconfirm https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-mirrorlist-18-1-any.pkg.tar.zst
     
     echo -e "\n[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist" >> /etc/pacman.conf
-    pacman -Syy --noconfirm --needed yay chwd zram-generator \$KERNEL_LIST
+    pacman -Syy --noconfirm --needed yay chwd zram-generator $KERNEL_LIST
 
-    # --- SWAP & zRAM ---
+    # --- SWAP / zRAM / HIBERNATION ---
     if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
         if [[ "$FS_TYPE" == "btrfs" ]]; then
-            truncate -s 0 /swap/swapfile
-            chattr +C /swap/swapfile
+            truncate -s 0 /swap/swapfile && chattr +C /swap/swapfile
             btrfs property set /swap/swapfile compression none
             dd if=/dev/zero of=/swap/swapfile bs=1M count=4096 status=progress
             chmod 600 /swap/swapfile && mkswap /swap/swapfile && swapon /swap/swapfile
@@ -136,53 +123,45 @@ arch-chroot /mnt /bin/bash <<EOF
         echo -e "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd" > /etc/systemd/zram-generator.conf
     fi
 
-    # --- INITRAMFS ---
-    if [ "$ENCRYPT" = true ]; then
-        NEW_HOOKS="base systemd autodetect modconf sd-vconsole sd-keyboard block sd-encrypt filesystems"
-    else
-        NEW_HOOKS="base udev autodetect modconf block filesystems keyboard fsck"
-    fi
-    [[ "$SWAP_CHOICE" == *"Swap"* ]] && NEW_HOOKS=\$(echo \$NEW_HOOKS | sed 's/block/block resume/')
-    [[ "$FS_TYPE" == "btrfs" ]] && NEW_HOOKS="\${NEW_HOOKS} btrfs"
-    sed -i "s/^HOOKS=(.*)/HOOKS=(\$NEW_HOOKS)/" /etc/mkinitcpio.conf
+    # Initramfs
+    HOOKS="base udev autodetect modconf block filesystems keyboard fsck"
+    [[ "$SWAP_CHOICE" == *"Swap"* ]] && HOOKS=\$(echo \$HOOKS | sed 's/block/block resume/')
+    [[ "$FS_TYPE" == "btrfs" ]] && HOOKS="\$HOOKS btrfs"
+    sed -i "s/^HOOKS=(.*)/HOOKS=(\$HOOKS)/" /etc/mkinitcpio.conf
     mkinitcpio -P
 
+    # User Setup
     useradd -m -G wheel -s /usr/bin/fish $USERNAME
     echo "$USERNAME:$PASS" | chpasswd
     echo "root:$ROOT_PASS" | chpasswd
     echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/10-shadow
 
+    # App Installation
     chwd -a
-    for pkg in \$APPS; do
+    for pkg in $APPS; do
         sudo -u $USERNAME bash -c "export HOME=/home/$USERNAME && yay -S --noconfirm --needed \$pkg" || echo "Failed: \$pkg"
     done
 
-    # --- BOOTLOADER ---
+    # Bootloader
     MAIN_KERN=\$(echo $KERNEL_LIST | awk '{print \$1}')
     bootctl install
-    if [ "$ENCRYPT" = true ]; then
-        OPTIONS="rd.luks.name=\$(blkid -s UUID -o value $P2)=cryptroot root=/dev/mapper/cryptroot"
-        RESUME_DEV="/dev/mapper/cryptroot"
-    else
-        OPTIONS="root=PARTUUID=\$(blkid -s PARTUUID -o value $P2)"
-        RESUME_DEV="$REAL_ROOT"
-    fi
-
+    OPTIONS="root=PARTUUID=\$(blkid -s PARTUUID -o value $P2) rw"
+    
     if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
         if [[ "$FS_TYPE" == "btrfs" ]]; then
             OFFSET=\$(btrfs inspect-internal map-swapfile -r /swap/swapfile | awk '{print \$4}')
-            OPTIONS="\$OPTIONS resume=\$RESUME_DEV resume_offset=\$OFFSET"
+            OPTIONS="\$OPTIONS resume=$P2 resume_offset=\$OFFSET"
         else
-            OPTIONS="\$OPTIONS resume=\$RESUME_DEV"
+            OPTIONS="\$OPTIONS resume=$P2"
         fi
     fi
 
     [[ "$FS_TYPE" == "btrfs" ]] && OPTIONS="\$OPTIONS rootflags=subvol=@"
     echo -e "default arch.conf\ntimeout 3\nconsole-mode max" > /boot/loader/loader.conf
-    echo -e "title ShadowOS\nlinux /vmlinuz-\$MAIN_KERN\ninitrd /initramfs-\$MAIN_KERN.img\noptions \$OPTIONS rw" > /boot/loader/entries/arch.conf
+    echo -e "title ShadowOS\nlinux /vmlinuz-\$MAIN_KERN\ninitrd /initramfs-\$MAIN_KERN.img\noptions \$OPTIONS" > /boot/loader/entries/arch.conf
 
     systemctl enable NetworkManager power-profiles-daemon
     sed -i 's/NOPASSWD: //' /etc/sudoers.d/10-shadow
 EOF
 
-ui_header "ShadowOS Deployed!"
+ui_header "ShadowOS Installed!"
