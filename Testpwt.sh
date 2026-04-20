@@ -49,7 +49,9 @@ if [[ "$MODE" == "Wipe (2GB EFI)" ]]; then
     sgdisk -Z "$DEVICE"
     sgdisk -n 1:0:+2G -t 1:ef00 "$DEVICE"
     sgdisk -n 2:0:0 -t 2:8304 "$DEVICE"
-    partprobe "$DEVICE" && sleep 2
+    partprobe "$DEVICE" && sleep 3
+    
+    # Precise naming for NVMe vs SATA
     if [[ "$DEVICE" == *"nvme"* ]] || [[ "$DEVICE" == *"mmcblk"* ]]; then
         P1="${DEVICE}p1"; P2="${DEVICE}p2"
     else
@@ -94,17 +96,15 @@ arch-chroot /mnt /bin/bash <<EOF
     echo "$LOCALE UTF-8" >> /etc/locale.gen && locale-gen
     echo "LANG=$LOCALE" > /etc/locale.conf && echo "$HOSTNAME" > /etc/hostname
 
-    # --- RELIABLE CACHYOS REPO SETUP ---
-    # Fetching the keys and lists directly to avoid 404 script errors
-    pacman-key --recv-keys F3B607488DB35A47 --keyserver keyserver.ubuntu.com
-    pacman-key --lsign-key F3B607488DB35A47
-    pacman -U --noconfirm https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-keyring-20240331-1-any.pkg.tar.zst
-    pacman -U --noconfirm https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-mirrorlist-18-1-any.pkg.tar.zst
+    # --- RE-ENGINEERED CACHYOS REPO SETUP ---
+    # We download the official script but fix the URL and ensure it executes correctly
+    curl -L https://raw.githubusercontent.com/CachyOS/cachyos-repo/master/cachyos-repo.sh -o cachyos-repo.sh
+    chmod +x cachyos-repo.sh
+    ./cachyos-repo.sh
     
-    echo -e "\n[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist" >> /etc/pacman.conf
     pacman -Syy --noconfirm --needed yay chwd zram-generator $KERNEL_LIST
 
-    # --- SWAP / zRAM / HIBERNATION ---
+    # --- SWAP & zRAM ---
     if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
         if [[ "$FS_TYPE" == "btrfs" ]]; then
             truncate -s 0 /swap/swapfile && chattr +C /swap/swapfile
