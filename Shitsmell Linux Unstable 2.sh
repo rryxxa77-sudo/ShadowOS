@@ -78,7 +78,7 @@ echo "Kernel:    $KERN_PKG"
 echo "Desktop:   $DE_CHOICE"
 echo "Target:    $DEVICE ($MODE)"
 echo "FS:        $FS_TYPE"
-echo "Hardware:  chwd Auto-Driver, Bluetooth, WiFi, Power-Profiles"
+echo "Hardware:  chwd (CachyOS Repo), Bluetooth, WiFi, Power-Profiles"
 echo ""
 gum confirm "Begin installation? Data on $DEVICE will be overwritten."
 
@@ -89,18 +89,11 @@ reflector --latest 15 --protocol https --sort rate --save /etc/pacman.d/mirrorli
 
 # --- SMART PARTITIONING ENGINE ---
 if [[ "$MODE" == "Erase Disk" ]]; then
-    echo "Wiping $DEVICE..."
     sgdisk -Z "$DEVICE"
-    echo "Creating EFI partition..."
     sgdisk -n 1:0:+1G -t 1:ef00 "$DEVICE"
-    echo "Creating Root partition..."
     sgdisk -n 2:0:0 -t 2:8304 "$DEVICE"
-    
-    # Force kernel to re-read partition table
     partprobe "$DEVICE"
-    sleep 5 # Wait for dev nodes to settle
-    
-    # Intelligent Partition Naming Logic
+    sleep 5
     if [[ "$DEVICE" == *"nvme"* || "$DEVICE" == *"mmcblk"* ]]; then
         P1="${DEVICE}p1"
         P2="${DEVICE}p2"
@@ -108,20 +101,19 @@ if [[ "$MODE" == "Erase Disk" ]]; then
         P1="${DEVICE}1"
         P2="${DEVICE}2"
     fi
-    
 elif [[ "$MODE" == "Replace Partition" ]]; then
     P2=$(lsblk -lnp -o NAME,SIZE "$DEVICE" | gum filter --placeholder "Select partition to overwrite" | awk '{print $1}')
     P1=$(lsblk -lnp -o NAME,TYPE "$DEVICE" | grep "part" | grep -i "efi" | head -n1 | awk '{print $1}')
-    [[ -z "$P1" ]] && P1=$(gum input --placeholder "Path to EFI partition (e.g. /dev/nvme0n1p1)")
+    [[ -z "$P1" ]] && P1=$(gum input --placeholder "Path to EFI partition")
 else
     cfdisk "$DEVICE"
-    P1=$(gum input --placeholder "EFI Partition Path (e.g. /dev/nvme0n1p1)")
-    P2=$(gum input --placeholder "Root Partition Path (e.g. /dev/nvme0n1p2)")
+    P1=$(gum input --placeholder "EFI Partition Path")
+    P2=$(gum input --placeholder "Root Partition Path")
 fi
 
-# Verify paths exist before formatting
+# Verification
 if [[ ! -b "$P1" || ! -b "$P2" ]]; then
-    echo "ERROR: Partition nodes not found. P1: $P1, P2: $P2"
+    echo "Partition nodes failed to appear. Check /dev/."
     exit 1
 fi
 
@@ -147,7 +139,7 @@ mount "$P1" /mnt/boot
 
 # --- Pacstrap ---
 CORE_PKGS="base base-devel linux-firmware git fish sudo networkmanager btrfs-progs $KERN_PKG ${KERN_PKG}-headers bluez bluez-utils"
-ALL_APPS="steam power-profiles-daemon atlauncher-bin faugus-launcher hytale-launcher-bin mangohud protontricks obsidian-bin discord flatpak bazaar micro fastfetch zen-browser-bin vacuumtube krita goverlay heroic-games-launcher-bin protonplus kitty onlyoffice-bin gpu-screen-recorder shelly-bin lact-bin kate gparted plasma-nm bluedevil pipewire-pulse"
+ALL_APPS="power-profiles-daemon steam atlauncher-bin faugus-launcher hytale-launcher-bin mangohud protontricks obsidian-bin discord flatpak bazaar micro fastfetch zen-browser-bin vacuumtube krita goverlay heroic-games-launcher-bin protonplus kitty onlyoffice-bin gpu-screen-recorder shelly-bin lact-bin kate gparted plasma-nm bluedevil pipewire-pulse"
 
 pacstrap -K /mnt $CORE_PKGS
 genfstab -U /mnt >> /mnt/etc/fstab
@@ -158,6 +150,14 @@ arch-chroot /mnt /bin/bash <<EOF
     sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 15/' /etc/pacman.conf
     echo -e "[multilib]\nInclude = /etc/pacman.d/mirrorlist" >> /etc/pacman.conf
     
+    # --- CachyOS Repository Integration (Official Method) ---
+    echo "Installing CachyOS Repositories..."
+    curl https://mirror.cachyos.org/cachyos-repo.tar.xz -o cachyos-repo.tar.xz
+    tar xvf cachyos-repo.tar.xz
+    cd cachyos-repo
+    ./cachyos-repo.sh
+    cd .. && rm -rf cachyos-repo cachyos-repo.tar.xz
+
     pacman -Syu --noconfirm
 
     ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime && hwclock --systohc
@@ -175,12 +175,20 @@ arch-chroot /mnt /bin/bash <<EOF
         "XFCE") pacman -Syu --noconfirm xfce4 xfce4-goodies sddm network-manager-applet ;;
     esac
     
-    systemctl enable sddm NetworkManager bluetooth power-profiles-daemon
+    # Individual service enablement to prevent daemon conflicts
+    systemctl enable sddm
+    systemctl enable NetworkManager
+    systemctl enable bluetooth
+    systemctl enable power-profiles-daemon
 
+    # AUR Helper
     sudo -u $USERNAME bash -c "cd /tmp && git clone https://aur.archlinux.org/yay-bin.git && cd yay-bin && makepkg -si --noconfirm"
 
-    sudo -u $USERNAME yay -Syu --noconfirm chwd
+    # chwd Installation from CachyOS Repos
+    pacman -S --noconfirm chwd
     chwd -a
+
+    # Applications
     sudo -u $USERNAME yay -Syu --noconfirm --needed $ALL_APPS
 
     if [[ "$SWAP_CHOICE" == "Hybrid"* ]]; then
@@ -213,4 +221,3 @@ EOF
 ui_banner
 gum style --foreground 46 "Shitsmell Linux Install Successful."
 gum confirm "Reboot now?" && reboot
-
