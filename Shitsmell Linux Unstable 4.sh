@@ -78,7 +78,6 @@ echo "Kernel:    $KERN_PKG"
 echo "Desktop:   $DE_CHOICE"
 echo "Target:    $DEVICE ($MODE)"
 echo "FS:        $FS_TYPE"
-echo "Strategy:  Late-Stage CachyOS Repo Injection + chwd Auto-Config"
 echo ""
 gum confirm "Begin installation? Data on $DEVICE will be overwritten."
 
@@ -167,23 +166,25 @@ arch-chroot /mnt /bin/bash <<EOF
 
     sudo -u $USERNAME bash -c "cd /tmp && git clone https://aur.archlinux.org/yay-bin.git && cd yay-bin && makepkg -si --noconfirm"
 
-    # --- LATE STAGE CACHYOS REPO INJECTION ---
+    # --- FIXED CACHYOS REPO INJECTION ---
     echo "Injecting CachyOS Repositories..."
     curl https://mirror.cachyos.org/cachyos-repo.tar.xz -o cachyos-repo.tar.xz
     tar xvf cachyos-repo.tar.xz
     cd cachyos-repo
+    # Pre-install keyring
     pacman -U --noconfirm https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-keyring-20240331-1-any.pkg.tar.zst || true
+    
+    # Force --noconfirm for the script execution
+    sed -i 's/pacman -S/pacman --noconfirm -S/g' cachyos-repo.sh
     ./cachyos-repo.sh
+    
     cd .. && rm -rf cachyos-repo cachyos-repo.tar.xz
 
-    # Update and install optimized hardware tools
+    # Final sync and tool install
     pacman -Syu --noconfirm
     pacman -S --noconfirm chwd power-profiles-daemon
     
-    # Run Hardware Configuration
     chwd -a
-    
-    # Enable power-profiles-daemon AFTER it is actually installed
     systemctl enable power-profiles-daemon
 
     # Applications
@@ -219,5 +220,5 @@ arch-chroot /mnt /bin/bash <<EOF
 EOF
 
 ui_banner
-gum style --foreground 46 "Shitsmell Linux Install Successful. Power profiles fixed."
+gum style --foreground 46 "Shitsmell Linux Install Successful."
 gum confirm "Reboot now?" && reboot
