@@ -2,10 +2,7 @@
 set -e
 
 # --- Core Setup ---
-#!/bin/bash
-set -e
-
-# --- Core Setup ---
+# Force sync immediately for gum/reflector
 [[ ! -f /usr/bin/gum ]] && pacman -Sy --noconfirm gum reflector
 ui_header() { clear; gum style --foreground 39 --border double --margin "1 1" --padding "1 2" "SHADOWOS: $1"; }
 sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 15/' /etc/pacman.conf
@@ -18,39 +15,37 @@ PASS=$(gum input --password --placeholder "Password")
 ROOT_PASS=$(gum input --password --placeholder "Root Password (blank to sync)")
 [[ -z "$ROOT_PASS" ]] && ROOT_PASS="$PASS"
 
-# --- 2. Regional & Keyboard ---
+# --- 2. Regional ---
 ui_header "Regional"
 KEYMAP=$(localectl list-keymaps | gum filter --placeholder "Select Layout")
 loadkeys "$KEYMAP"
 LOCALE=$(grep "UTF-8" /etc/locale.gen | sed 's/^#//' | awk '{print $1}' | gum filter)
 TIMEZONE=$(timedatectl list-timezones | gum filter)
 
-# --- 3. Storage & Memory ---
+# --- 3. Storage ---
 ui_header "Storage"
 DEVICE=$(lsblk -dno NAME,SIZE,MODEL | gum filter | awk '{print "/dev/"$1}')
 FS_TYPE=$(gum choose "btrfs" "f2fs" "ext4")
 MODE=$(gum choose "Wipe (2GB EFI)" "Manual (cfdisk)")
 SWAP_CHOICE=$(gum choose "Both (zRAM + 4GB Swap + Hibernation)" "zRAM Only" "None")
 
-# --- 4. Desktop Selection ---
-ui_header "Desktop Selection"
+# --- 4. Desktop & Kernels ---
+ui_header "Selection"
 DE_CHOICE=$(gum choose "KDE Plasma" "GNOME" "Cinnamon" "LXQt" "None (CLI)")
+# All kernel options restored
+KERNELS=$(gum choose --no-limit --header "Select Kernels" "linux-fsync-nobara-bin" "linux-zen" "linux-lts" "linux")
+KERNEL_LIST=$(echo "$KERNELS" | tr '\n' ' ')
 
-# --- 5. Performance ---
-ui_header "Mirror Optimization"
-reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
-
-# --- 6. The Master App List (ALL via YAY) ---
-# We only use pacstrap for the bare essentials to boot.
+# --- 5. The Master App List (Staging for Yay -Sy) ---
 CORE_PKGS="base base-devel linux-firmware git fish sudo networkmanager btrfs-progs"
 
-# This entire list will be handled by Yay to avoid "Target Not Found"
-ALL_APPS="linux-fsync-nobara-bin steam power-profiles-daemon mangohud protontricks discord flatpak bazaar spotify micro fastfetch kitty popsicle gparted atlauncher-bin faugus-launcher hytale-launcher-bin obsidian-bin zen-browser-bin vacuumtube krita-git goverlay heroic-games-launcher-bin protonplus onlyoffice-bin shelly-bin lact-git fresh kate"
+# All requested apps including power-profiles-daemon
+ALL_APPS="steam power-profiles-daemon atlauncher-bin faugus-launcher hytale-launcher-bin mangohud protontricks obsidian-bin discord flatpak bazaar spotify lact-git micro fresh fastfetch zen-browser-bin vacuumtube krita-git goverlay heroic-games-launcher-bin protonplus kitty popsicle onlyoffice-bin shelly-bin kate gparted networkmanager"
 
 # --- Execution ---
 clear
-gum style --foreground 196 "CLEAN INSTALLING SHADOWOS ON $DEVICE"
-gum confirm "Start Installation?" || exit 1
+gum style --foreground 196 "STARTING SYNC-FORCED INSTALL ON $DEVICE"
+gum confirm "Proceed?" || exit 1
 
 # --- Partitioning ---
 if [[ "$MODE" == "Wipe (2GB EFI)" ]]; then
@@ -90,12 +85,15 @@ else
 fi
 mount "$P1" /mnt/boot
 
-# --- Base Pacstrap (Essentials Only) ---
-pacstrap /mnt $CORE_PKGS
+# --- Base Pacstrap (Forced Sync) ---
+pacstrap -Sy /mnt $CORE_PKGS
 genfstab -U /mnt >> /mnt/etc/fstab
 
 arch-chroot /mnt /bin/bash <<EOF
     set -e
+    # Force database sync inside chroot
+    pacman -Sy --noconfirm
+    
     sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 15/' /etc/pacman.conf
     echo -e "[multilib]\nInclude = /etc/pacman.d/mirrorlist" >> /etc/pacman.conf
 
@@ -103,33 +101,31 @@ arch-chroot /mnt /bin/bash <<EOF
     echo "$LOCALE UTF-8" >> /etc/locale.gen && locale-gen
     echo "LANG=$LOCALE" > /etc/locale.conf && echo "$HOSTNAME" > /etc/hostname
 
-    # Setup User Early (Needed for Yay)
     useradd -m -G wheel -s /usr/bin/fish $USERNAME
     echo "$USERNAME:$PASS" | chpasswd
     echo "root:$ROOT_PASS" | chpasswd
     echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/10-shadow
 
-    # Desktop Environment
+    # Desktop Install (Forced Sync)
     case "$DE_CHOICE" in
-        "KDE Plasma") pacman -S --noconfirm plasma-desktop sddm konsole dolphin ;;
-        "GNOME") pacman -S --noconfirm gnome gnome-tweaks ;;
-        "Cinnamon") pacman -S --noconfirm cinnamon lightdm lightdm-gtk-greeter ;;
-        "LXQt") pacman -S --noconfirm lxqt sddm ;;
+        "KDE Plasma") pacman -Sy --noconfirm plasma-desktop sddm konsole dolphin ;;
+        "GNOME") pacman -Sy --noconfirm gnome gnome-tweaks ;;
+        "Cinnamon") pacman -Sy --noconfirm cinnamon lightdm lightdm-gtk-greeter ;;
+        "LXQt") pacman -Sy --noconfirm lxqt sddm ;;
     esac
 
-    # Enable Login Manager
+    # Display Manager Enable
     [[ "$DE_CHOICE" == "KDE Plasma" || "$DE_CHOICE" == "LXQt" ]] && systemctl enable sddm
     [[ "$DE_CHOICE" == "GNOME" ]] && systemctl enable gdm
     [[ "$DE_CHOICE" == "Cinnamon" ]] && systemctl enable lightdm
 
-    # --- Install Yay ---
+    # Install Yay
     sudo -u $USERNAME bash -c "cd /tmp && git clone https://aur.archlinux.org/yay-bin.git && cd yay-bin && makepkg -si --noconfirm"
 
-    # --- Install EVERYTHING else via Yay ---
-    # This includes the Nobara Kernel and all your apps
-    sudo -u $USERNAME yay -S --noconfirm --needed $ALL_APPS
+    # --- Install Kernels & All Apps via Yay (Forced Sync -Syu) ---
+    sudo -u $USERNAME yay -Syu --noconfirm --needed $KERNEL_LIST $ALL_APPS
 
-    # Memory Setup
+    # Swap/zRAM Setup
     if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
         if [[ "$FS_TYPE" == "btrfs" ]]; then
             truncate -s 0 /swap/swapfile && chattr +C /swap/swapfile
@@ -143,40 +139,28 @@ arch-chroot /mnt /bin/bash <<EOF
             echo "/swapfile none swap defaults 0 0" >> /etc/fstab
         fi
     fi
+    [[ "$SWAP_CHOICE" == *"zRAM"* ]] && pacman -Sy --noconfirm zram-generator && \
+    echo -e "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd" > /etc/systemd/zram-generator.conf
 
-    # zRAM
-    if [[ "$SWAP_CHOICE" == *"zRAM"* ]]; then
-        pacman -S --noconfirm zram-generator
-        echo -e "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd" > /etc/systemd/zram-generator.conf
-    fi
-
-    # Initramfs for Nobara Kernel
+    # Initramfs Generation
     HOOKS="base udev autodetect modconf block filesystems keyboard fsck"
     [[ "$SWAP_CHOICE" == *"Swap"* ]] && HOOKS=\$(echo \$HOOKS | sed 's/block/block resume/')
     [[ "$FS_TYPE" == "btrfs" ]] && HOOKS="\$HOOKS btrfs"
     sed -i "s/^HOOKS=(.*)/HOOKS=(\$HOOKS)/" /etc/mkinitcpio.conf
-    mkinitcpio -p linux-fsync-nobara-bin
+    mkinitcpio -P
 
     # Bootloader Setup
     bootctl install
+    MAIN_KERN=\$(echo $KERNEL_LIST | awk '{print \$1}')
     OPTIONS="root=PARTUUID=\$(blkid -s PARTUUID -o value $P2) rw"
-    
-    if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
-        if [[ "$FS_TYPE" == "btrfs" ]]; then
-            OFFSET=\$(btrfs inspect-internal map-swapfile -r /swap/swapfile | awk '{print \$4}')
-            OPTIONS="\$OPTIONS resume=$P2 resume_offset=\$OFFSET"
-        else
-            OPTIONS="\$OPTIONS resume=$P2"
-        fi
-    fi
     [[ "$FS_TYPE" == "btrfs" ]] && OPTIONS="\$OPTIONS rootflags=subvol=@"
 
     echo -e "default arch.conf\ntimeout 3\nconsole-mode max" > /boot/loader/loader.conf
-    echo -e "title ShadowOS (Nobara)\nlinux /vmlinuz-linux-fsync-nobara-bin\ninitrd /initramfs-linux-fsync-nobara-bin.img\noptions \$OPTIONS" > /boot/loader/entries/arch.conf
+    echo -e "title ShadowOS\nlinux /vmlinuz-\$MAIN_KERN\ninitrd /initramfs-\$MAIN_KERN.img\noptions \$OPTIONS" > /boot/loader/entries/arch.conf
 
-    # System Services
     systemctl enable NetworkManager power-profiles-daemon
     sed -i 's/NOPASSWD: //' /etc/sudoers.d/10-shadow
 EOF
 
-ui_header "Nobara-Powered ShadowOS Ready!"
+ui_header "All Synced! ShadowOS is ready."
+
