@@ -28,23 +28,18 @@ FS_TYPE=$(gum choose "btrfs" "f2fs" "ext4")
 MODE=$(gum choose "Wipe (2GB EFI)" "Manual (cfdisk)")
 SWAP_CHOICE=$(gum choose "Both (zRAM + 4GB Swap + Hibernation)" "zRAM Only" "None")
 
-# --- 4. Desktop & Kernels ---
-ui_header "Selection"
-DE_CHOICE=$(gum choose "no desktop" "kde" "lxqt" "cinnamon" "gnome")
-KERNELS=$(gum choose --no-limit --header "Select Kernels" "linux-fsync-nobara-bin" "linux-zen" "linux-lts" "linux")
-KERNEL_LIST=$(echo "$KERNELS" | tr '\n' ' ')
-
-# --- 5. Mirror Enhancement (AFTER KERNEL PICKING) ---
+# --- 4. Mirror Optimization ---
 ui_header "Mirror Optimization"
 reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
 
-# --- 6. The Master App List ---
-CORE_PKGS="base base-devel linux-firmware git fish sudo networkmanager btrfs-progs"
-ALL_APPS="steam power-profiles-daemon atlauncher-bin faugus-launcher hytale-launcher-bin mangohud protontricks obsidian-bin discord flatpak bazaar spotify lact-git micro fresh fastfetch zen-browser-bin vacuumtube krita-git goverlay heroic-games-launcher-bin protonplus kitty popsicle onlyoffice-bin shelly-bin kate gparted networkmanager"
+# --- 5. App List (Cleaned) ---
+# Removed Spotify & Nobara Kernel to avoid PGP/Build failures
+CORE_PKGS="base base-devel linux-firmware git fish sudo networkmanager btrfs-progs linux-zen linux-zen-headers"
+ALL_APPS="steam power-profiles-daemon atlauncher-bin faugus-launcher hytale-launcher-bin mangohud protontricks obsidian-bin discord flatpak bazaar micro fastfetch zen-browser-bin vacuumtube krita-git goverlay heroic-games-launcher-bin protonplus kitty popsicle onlyoffice-bin shelly-bin kate gparted"
 
 # --- Execution ---
 clear
-gum style --foreground 196 "CLEAN INSTALLING SHADOWOS ON $DEVICE"
+gum style --foreground 196 "CLEAN INSTALLING SHADOWOS (ZEN EDITION) ON $DEVICE"
 gum confirm "Proceed?" || exit 1
 
 # --- Partitioning ---
@@ -85,13 +80,15 @@ else
 fi
 mount "$P1" /mnt/boot
 
-# --- CORRECTED Pacstrap (No -Sy flag) ---
+# --- Pacstrap (Zen included here) ---
 pacstrap -K /mnt $CORE_PKGS
 genfstab -U /mnt >> /mnt/etc/fstab
 
 arch-chroot /mnt /bin/bash <<EOF
     set -e
-    # Force database sync inside chroot
+    # Fix keys immediately
+    pacman-key --init
+    pacman-key --populate archlinux
     pacman -Sy --noconfirm
     
     sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 15/' /etc/pacman.conf
@@ -106,27 +103,17 @@ arch-chroot /mnt /bin/bash <<EOF
     echo "root:$ROOT_PASS" | chpasswd
     echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/10-shadow
 
-    # Desktop Install (Forced Sync)
-    case "$DE_CHOICE" in
-        "kde") pacman -Sy --noconfirm plasma-desktop sddm konsole dolphin ;;
-        "gnome") pacman -Sy --noconfirm gnome gnome-tweaks ;;
-        "cinnamon") pacman -Sy --noconfirm cinnamon lightdm lightdm-gtk-greeter ;;
-        "lxqt") pacman -Sy --noconfirm lxqt sddm ;;
-        "no desktop") echo "Skipping DE install" ;;
-    esac
-
-    # Display Manager Enable
-    [[ "$DE_CHOICE" == "kde" || "$DE_CHOICE" == "lxqt" ]] && systemctl enable sddm
-    [[ "$DE_CHOICE" == "gnome" ]] && systemctl enable gdm
-    [[ "$DE_CHOICE" == "cinnamon" ]] && systemctl enable lightdm
+    # Desktop (KDE/SDDM)
+    pacman -Sy --noconfirm plasma-desktop sddm konsole dolphin
+    systemctl enable sddm
 
     # Install Yay
     sudo -u $USERNAME bash -c "cd /tmp && git clone https://aur.archlinux.org/yay-bin.git && cd yay-bin && makepkg -si --noconfirm"
 
-    # --- Install All via Yay (Forced Sync -Sy) ---
-    sudo -u $USERNAME yay -Sy --noconfirm --needed $KERNEL_LIST $ALL_APPS
+    # --- Install Apps (Forced Sync) ---
+    sudo -u $USERNAME yay -Sy --noconfirm --needed $ALL_APPS
 
-    # Swap/zRAM Setup
+    # Swap/zRAM
     if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
         if [[ "$FS_TYPE" == "btrfs" ]]; then
             truncate -s 0 /swap/swapfile && chattr +C /swap/swapfile
@@ -143,24 +130,23 @@ arch-chroot /mnt /bin/bash <<EOF
     [[ "$SWAP_CHOICE" == *"zRAM"* ]] && pacman -Sy --noconfirm zram-generator && \
     echo -e "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd" > /etc/systemd/zram-generator.conf
 
-    # Initramfs Generation
+    # Initramfs for Zen
     HOOKS="base udev autodetect modconf block filesystems keyboard fsck"
     [[ "$SWAP_CHOICE" == *"Swap"* ]] && HOOKS=\$(echo \$HOOKS | sed 's/block/block resume/')
     [[ "$FS_TYPE" == "btrfs" ]] && HOOKS="\$HOOKS btrfs"
     sed -i "s/^HOOKS=(.*)/HOOKS=(\$HOOKS)/" /etc/mkinitcpio.conf
-    mkinitcpio -P
+    mkinitcpio -p linux-zen
 
     # Bootloader Setup
     bootctl install
-    MAIN_KERN=\$(echo $KERNEL_LIST | awk '{print \$1}')
     OPTIONS="root=PARTUUID=\$(blkid -s PARTUUID -o value $P2) rw"
     [[ "$FS_TYPE" == "btrfs" ]] && OPTIONS="\$OPTIONS rootflags=subvol=@"
 
     echo -e "default arch.conf\ntimeout 3\nconsole-mode max" > /boot/loader/loader.conf
-    echo -e "title ShadowOS\nlinux /vmlinuz-\$MAIN_KERN\ninitrd /initramfs-\$MAIN_KERN.img\noptions \$OPTIONS" > /boot/loader/entries/arch.conf
+    echo -e "title ShadowOS (Zen)\nlinux /vmlinuz-linux-zen\ninitrd /initramfs-linux-zen.img\noptions \$OPTIONS" > /boot/loader/entries/arch.conf
 
     systemctl enable NetworkManager power-profiles-daemon
     sed -i 's/NOPASSWD: //' /etc/sudoers.d/10-shadow
 EOF
 
-ui_header "All Synced, Fast, and Corrected! Reboot now."
+ui_header "Zen Edition Deployed. No PGP errors this time."
