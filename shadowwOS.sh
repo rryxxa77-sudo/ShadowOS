@@ -48,12 +48,23 @@ clear
 gum style --foreground 196 "INITIALIZING INSTALL ON $DEVICE"
 gum confirm "Proceed?" || exit 1
 
-# Partition Naming (NVME/MMC/SATA)
+# --- FIXED Partition Naming Logic ---
 if [[ "$MODE" == "Wipe (2GB EFI)" ]]; then
     sgdisk -Z "$DEVICE"
     sgdisk -n 1:0:+2G -t 1:ef00 "$DEVICE"
     sgdisk -n 2:0:0 -t 2:8304 "$DEVICE"
-    [[ "$DEVICE" == *"nvme"* || "$DEVICE" == *"mmcblk"* ]] && P1="${DEVICE}p1"; P2="${DEVICE}p2" || P1="${DEVICE}1"; P2="${DEVICE}2"
+    
+    # Force kernel to re-read partition table
+    partprobe "$DEVICE"
+    sleep 2
+
+    if [[ "$DEVICE" == *"nvme"* ]] || [[ "$DEVICE" == *"mmcblk"* ]]; then
+        P1="${DEVICE}p1"
+        P2="${DEVICE}p2"
+    else
+        P1="${DEVICE}1"
+        P2="${DEVICE}2"
+    fi
 else
     P2=$(gum input --placeholder "Root Partition Path")
     P1=$(gum input --placeholder "EFI Partition Path")
@@ -108,7 +119,7 @@ arch-chroot /mnt /bin/bash <<EOF
     echo "$LOCALE UTF-8" >> /etc/locale.gen && locale-gen
     echo "LANG=$LOCALE" > /etc/locale.conf && echo "$HOSTNAME" > /etc/hostname
 
-    # Repo & Base Toolkit (No cachyos-settings)
+    # Repo & Base Toolkit
     curl https://mirror.cachyos.org/cachyos-repo.sh | bash
     pacman -Syy --noconfirm --needed yay chwd zram-generator $KERNEL_LIST
 
@@ -135,7 +146,6 @@ arch-chroot /mnt /bin/bash <<EOF
     else
         NEW_HOOKS="base udev autodetect modconf block filesystems keyboard fsck"
     fi
-    # Inject resume hook
     NEW_HOOKS=\$(echo \$NEW_HOOKS | sed 's/block/block resume/')
     [[ "$FS_TYPE" == "btrfs" ]] && NEW_HOOKS="\${NEW_HOOKS} btrfs"
     sed -i "s/^HOOKS=(.*)/HOOKS=(\$NEW_HOOKS)/" /etc/mkinitcpio.conf
@@ -165,7 +175,7 @@ arch-chroot /mnt /bin/bash <<EOF
         RESUME_DEV="$REAL_ROOT"
     fi
 
-    # Hibernation Resume Logic (Dynamic Check)
+    # Hibernation Resume Logic
     if [[ "$FS_TYPE" == "btrfs" ]]; then
         OFFSET=\$(btrfs inspect-internal map-swapfile -r /swap/swapfile | awk '{print \$4}')
         OPTIONS="\$OPTIONS resume=\$RESUME_DEV resume_offset=\$OFFSET"
