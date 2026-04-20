@@ -29,7 +29,6 @@ while true; do
     
     echo "Type below to verify layout (Wait 15s):"
     echo "--------------------------------------"
-    # Replaced gum timeout with sleep + read
     read -t 15 -p "Test keys: " TEST_INPUT || true
     echo -e "\n"
     
@@ -46,7 +45,6 @@ TIMEZONE=$(timedatectl list-timezones | gum filter --placeholder "Select Timezon
 
 ui_banner
 echo "Current Time Preview:"
-# Replaced gum timeout with export + date + sleep
 export TZ=$TIMEZONE
 date '+%H:%M:%S - %d %B %Y'
 sleep 10
@@ -89,21 +87,42 @@ ui_banner
 echo "Optimizing mirrors..."
 reflector --latest 15 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
 
-# --- Partitioning Engine ---
+# --- SMART PARTITIONING ENGINE ---
 if [[ "$MODE" == "Erase Disk" ]]; then
+    echo "Wiping $DEVICE..."
     sgdisk -Z "$DEVICE"
+    echo "Creating EFI partition..."
     sgdisk -n 1:0:+1G -t 1:ef00 "$DEVICE"
+    echo "Creating Root partition..."
     sgdisk -n 2:0:0 -t 2:8304 "$DEVICE"
-    partprobe "$DEVICE" && sleep 3
-    [[ "$DEVICE" == *"nvme"* ]] && P1="${DEVICE}p1" && P2="${DEVICE}p2" || P1="${DEVICE}1" && P2="${DEVICE}2"
+    
+    # Force kernel to re-read partition table
+    partprobe "$DEVICE"
+    sleep 5 # Wait for dev nodes to settle
+    
+    # Intelligent Partition Naming Logic
+    if [[ "$DEVICE" == *"nvme"* || "$DEVICE" == *"mmcblk"* ]]; then
+        P1="${DEVICE}p1"
+        P2="${DEVICE}p2"
+    else
+        P1="${DEVICE}1"
+        P2="${DEVICE}2"
+    fi
+    
 elif [[ "$MODE" == "Replace Partition" ]]; then
     P2=$(lsblk -lnp -o NAME,SIZE "$DEVICE" | gum filter --placeholder "Select partition to overwrite" | awk '{print $1}')
     P1=$(lsblk -lnp -o NAME,TYPE "$DEVICE" | grep "part" | grep -i "efi" | head -n1 | awk '{print $1}')
-    [[ -z "$P1" ]] && P1=$(gum input --placeholder "Path to EFI partition")
+    [[ -z "$P1" ]] && P1=$(gum input --placeholder "Path to EFI partition (e.g. /dev/nvme0n1p1)")
 else
     cfdisk "$DEVICE"
-    P1=$(gum input --placeholder "EFI Partition Path")
-    P2=$(gum input --placeholder "Root Partition Path")
+    P1=$(gum input --placeholder "EFI Partition Path (e.g. /dev/nvme0n1p1)")
+    P2=$(gum input --placeholder "Root Partition Path (e.g. /dev/nvme0n1p2)")
+fi
+
+# Verify paths exist before formatting
+if [[ ! -b "$P1" || ! -b "$P2" ]]; then
+    echo "ERROR: Partition nodes not found. P1: $P1, P2: $P2"
+    exit 1
 fi
 
 # Formatting
@@ -139,7 +158,6 @@ arch-chroot /mnt /bin/bash <<EOF
     sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 15/' /etc/pacman.conf
     echo -e "[multilib]\nInclude = /etc/pacman.d/mirrorlist" >> /etc/pacman.conf
     
-    # Sync databases
     pacman -Syu --noconfirm
 
     ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime && hwclock --systohc
@@ -151,25 +169,20 @@ arch-chroot /mnt /bin/bash <<EOF
     echo "root:$ROOT_PASS" | chpasswd
     echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/10-shadow
 
-    # Desktop Environment Installation
     case "$DE_CHOICE" in
-        "KDE Plasma (Recommended)") pacman -Syu --noconfirm plasma-desktop sddm konsole dolphin ;;
-        "GNOME") pacman -Syu --noconfirm gnome gnome-tweaks sddm ;;
-        "XFCE") pacman -Syu --noconfirm xfce4 xfce4-goodies sddm ;;
+        "KDE Plasma (Recommended)") pacman -Syu --noconfirm plasma-desktop sddm konsole dolphin plasma-nm ;;
+        "GNOME") pacman -Syu --noconfirm gnome gnome-tweaks sddm network-manager-applet ;;
+        "XFCE") pacman -Syu --noconfirm xfce4 xfce4-goodies sddm network-manager-applet ;;
     esac
+    
     systemctl enable sddm NetworkManager bluetooth power-profiles-daemon
 
-    # AUR Helper
     sudo -u $USERNAME bash -c "cd /tmp && git clone https://aur.archlinux.org/yay-bin.git && cd yay-bin && makepkg -si --noconfirm"
 
-    # Hardware Detection
     sudo -u $USERNAME yay -Syu --noconfirm chwd
     chwd -a
-
-    # Applications
     sudo -u $USERNAME yay -Syu --noconfirm --needed $ALL_APPS
 
-    # Swap Management
     if [[ "$SWAP_CHOICE" == "Hybrid"* ]]; then
         if [[ "$FS_TYPE" == "btrfs" ]]; then
             truncate -s 0 /swap/swapfile && chattr +C /swap/swapfile
@@ -186,7 +199,6 @@ arch-chroot /mnt /bin/bash <<EOF
     [[ "$SWAP_CHOICE" != "None" ]] && pacman -Syu --noconfirm zram-generator && \
     echo -e "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd" > /etc/systemd/zram-generator.conf
 
-    # Bootloader & Kernels
     mkinitcpio -P
     bootctl install
     OPTIONS="root=PARTUUID=\$(blkid -s PARTUUID -o value $P2) rw quiet splash"
@@ -201,3 +213,4 @@ EOF
 ui_banner
 gum style --foreground 46 "Shitsmell Linux Install Successful."
 gum confirm "Reboot now?" && reboot
+
