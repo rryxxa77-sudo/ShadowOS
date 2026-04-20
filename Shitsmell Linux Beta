@@ -9,7 +9,7 @@ sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 15/' /etc/pacman.conf
 ui_banner() {
     clear
     gum style --foreground 39 --border double --margin "1 1" --padding "1 2" --align center \
-        "ShadowOS" "System Deployment Utility"
+        "Shitsmell Linux" "System Deployment Utility"
 }
 
 # --- 1. User Configuration ---
@@ -18,7 +18,7 @@ USERNAME=$(gum input --placeholder "Username")
 PASS=$(gum input --password --placeholder "User Password")
 ROOT_PASS=$(gum input --password --placeholder "Root Password (leave blank to sync)")
 [[ -z "$ROOT_PASS" ]] && ROOT_PASS="$PASS"
-HOSTNAME="shadow"
+HOSTNAME="shitsmell"
 
 # --- 2. Input Configuration ---
 while true; do
@@ -27,8 +27,11 @@ while true; do
     KEYMAP=$(localectl list-keymaps | gum filter --placeholder "Select system keymap...")
     loadkeys "$KEYMAP"
     
-    echo "Type below to verify layout (15s):"
-    gum timeout --duration 15s -- gum input --placeholder "Test your keys here..."
+    echo "Type below to verify layout (Wait 15s):"
+    echo "--------------------------------------"
+    # Replaced gum timeout with sleep + read
+    read -t 15 -p "Test keys: " TEST_INPUT || true
+    echo -e "\n"
     
     if gum confirm "Does the keyboard layout work correctly?"; then
         break
@@ -43,7 +46,10 @@ TIMEZONE=$(timedatectl list-timezones | gum filter --placeholder "Select Timezon
 
 ui_banner
 echo "Current Time Preview:"
-gum timeout --duration 10s -- bash -c "export TZ=$TIMEZONE; date '+%H:%M:%S - %d %B %Y'"
+# Replaced gum timeout with export + date + sleep
+export TZ=$TIMEZONE
+date '+%H:%M:%S - %d %B %Y'
+sleep 10
 gum confirm "Does the displayed time match your local clock?"
 
 # --- 4. System Core & Desktop ---
@@ -186,13 +192,12 @@ arch-chroot /mnt /bin/bash <<EOF
     OPTIONS="root=PARTUUID=\$(blkid -s PARTUUID -o value $P2) rw quiet splash"
     [[ "$FS_TYPE" == "btrfs" ]] && OPTIONS="\$OPTIONS rootflags=subvol=@"
     echo -e "default arch.conf\ntimeout 3\nconsole-mode max" > /boot/loader/loader.conf
-    echo -e "title ShadowOS\nlinux /vmlinuz-$KERN_PKG\ninitrd /initramfs-$KERN_PKG.img\noptions \$OPTIONS" > /boot/loader/entries/arch.conf
+    echo -e "title Shitsmell Linux\nlinux /vmlinuz-$KERN_PKG\ninitrd /initramfs-$KERN_PKG.img\noptions \$OPTIONS" > /boot/loader/entries/arch.conf
     bootctl update
 
     sed -i 's/NOPASSWD: //' /etc/sudoers.d/10-shadow
 EOF
 
 ui_banner
-gum style --foreground 46 "ShadowOS Install Successful."
+gum style --foreground 46 "Shitsmell Linux Install Successful."
 gum confirm "Reboot now?" && reboot
-
