@@ -28,30 +28,34 @@ FS_TYPE=$(gum choose "btrfs" "f2fs" "ext4")
 MODE=$(gum choose "Wipe (2GB EFI)" "Manual (cfdisk)")
 SWAP_CHOICE=$(gum choose "Both (zRAM + 4GB Swap + Hibernation)" "zRAM Only" "None")
 
-# --- 4. Performance ---
+# --- 4. Desktop Selection ---
+ui_header "Desktop Selection"
+DE_CHOICE=$(gum choose "KDE Plasma" "GNOME" "Cinnamon" "LXQt" "None (CLI)")
+
+# --- 5. Performance ---
 ui_header "Mirror Optimization"
-reflector --latest 15 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
+reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
 
 ui_header "Kernel Selection"
-KERNELS=$(gum choose --no-limit --header "Select Kernels" "linux-fsync-nobara-bin" "linux-cachyos" "linux-zen")
+KERNELS=$(gum choose --no-limit --header "Select Kernels" "linux-zen" "linux" "linux-lts")
 KERNEL_LIST=$(echo "$KERNELS" | tr '\n' ' ')
 
-# --- 5. App Suite ---
-APPS="steam power-profiles-daemon mangohud protontricks obsidian-bin discord flatpak bazaar spotify lact-git micro fresh fastfetch zen-browser-bin vacuumtube krita-git goverlay heroic-games-launcher-bin protonplus kitty popsicle onlyoffice-bin gpu-screen-recorder-ui-git shelly-bin kate gparted networkmanager"
+# --- 6. The Master App List ---
+REPO_APPS="steam power-profiles-daemon mangohud protontricks discord flatpak spotify micro fastfetch kitty popsicle gparted networkmanager"
+AUR_APPS="atlauncher-bin faugus-launcher hytale-launcher-bin obsidian-bin bazaar zen-browser-bin vacuumtube krita-git goverlay heroic-games-launcher-bin protonplus onlyoffice-bin shelly-bin lact-git fresh"
 
 # --- Execution ---
 clear
-gum style --foreground 196 "STARTING INSTALL ON $DEVICE"
+gum style --foreground 196 "STARTING FULL INSTALL ON $DEVICE"
 gum confirm "Proceed?" || exit 1
 
-# --- Partitioning Logic ---
+# --- Partitioning ---
 if [[ "$MODE" == "Wipe (2GB EFI)" ]]; then
     sgdisk -Z "$DEVICE"
     sgdisk -n 1:0:+2G -t 1:ef00 "$DEVICE"
     sgdisk -n 2:0:0 -t 2:8304 "$DEVICE"
-    partprobe "$DEVICE" && sleep 3
+    partprobe "$DEVICE" && sleep 5
     
-    # Precise naming for NVMe vs SATA
     if [[ "$DEVICE" == *"nvme"* ]] || [[ "$DEVICE" == *"mmcblk"* ]]; then
         P1="${DEVICE}p1"; P2="${DEVICE}p2"
     else
@@ -59,8 +63,8 @@ if [[ "$MODE" == "Wipe (2GB EFI)" ]]; then
     fi
 else
     cfdisk "$DEVICE"
-    P1=$(gum input --placeholder "Enter EFI Partition (e.g. /dev/nvme0n1p1)")
-    P2=$(gum input --placeholder "Enter Root Partition (e.g. /dev/nvme0n1p2)")
+    P1=$(gum input --placeholder "Enter EFI Partition Path")
+    P2=$(gum input --placeholder "Enter Root Partition Path")
 fi
 
 # Formatting & Mounts
@@ -84,7 +88,7 @@ fi
 mount "$P1" /mnt/boot
 
 # Base Install
-pacstrap /mnt base base-devel linux-firmware git fish sudo networkmanager btrfs-progs
+pacstrap /mnt base base-devel linux-firmware git fish sudo networkmanager btrfs-progs $KERNEL_LIST $REPO_APPS
 genfstab -U /mnt >> /mnt/etc/fstab
 
 arch-chroot /mnt /bin/bash <<EOF
@@ -96,15 +100,23 @@ arch-chroot /mnt /bin/bash <<EOF
     echo "$LOCALE UTF-8" >> /etc/locale.gen && locale-gen
     echo "LANG=$LOCALE" > /etc/locale.conf && echo "$HOSTNAME" > /etc/hostname
 
-    # --- RE-ENGINEERED CACHYOS REPO SETUP ---
-    # We download the official script but fix the URL and ensure it executes correctly
-    curl -L https://raw.githubusercontent.com/CachyOS/cachyos-repo/master/cachyos-repo.sh -o cachyos-repo.sh
-    chmod +x cachyos-repo.sh
-    ./cachyos-repo.sh
-    
-    pacman -Syy --noconfirm --needed yay chwd zram-generator $KERNEL_LIST
+    # Desktop Setup
+    case "$DE_CHOICE" in
+        "KDE Plasma") pacman -S --noconfirm plasma-desktop sddm konsole dolphin kate ;;
+        "GNOME") pacman -S --noconfirm gnome gnome-tweaks ;;
+        "Cinnamon") pacman -S --noconfirm cinnamon lightdm lightdm-gtk-greeter kate ;;
+        "LXQt") pacman -S --noconfirm lxqt sddm ;;
+    esac
 
-    # --- SWAP & zRAM ---
+    # Enable DM
+    [[ "$DE_CHOICE" == "KDE Plasma" || "$DE_CHOICE" == "LXQt" ]] && systemctl enable sddm
+    [[ "$DE_CHOICE" == "GNOME" ]] && systemctl enable gdm
+    [[ "$DE_CHOICE" == "Cinnamon" ]] && systemctl enable lightdm
+
+    # Install Yay
+    sudo -u $USERNAME bash -c "cd /tmp && git clone https://aur.archlinux.org/yay-bin.git && cd yay-bin && makepkg -si --noconfirm"
+
+    # Memory Setup
     if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
         if [[ "$FS_TYPE" == "btrfs" ]]; then
             truncate -s 0 /swap/swapfile && chattr +C /swap/swapfile
@@ -120,48 +132,40 @@ arch-chroot /mnt /bin/bash <<EOF
     fi
 
     if [[ "$SWAP_CHOICE" == *"zRAM"* ]]; then
+        pacman -S --noconfirm zram-generator
         echo -e "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd" > /etc/systemd/zram-generator.conf
     fi
 
-    # Initramfs
+    # AUR App Installation
+    for pkg in $AUR_APPS; do
+        sudo -u $USERNAME yay -S --noconfirm --needed \$pkg || echo "Failed: \$pkg"
+    done
+
+    # Power Profile Performance
+    systemctl enable power-profiles-daemon
+    echo "performance" > /sys/firmware/acpi/platform_profile || true
+
+    # Initramfs & Boot
     HOOKS="base udev autodetect modconf block filesystems keyboard fsck"
     [[ "$SWAP_CHOICE" == *"Swap"* ]] && HOOKS=\$(echo \$HOOKS | sed 's/block/block resume/')
     [[ "$FS_TYPE" == "btrfs" ]] && HOOKS="\$HOOKS btrfs"
     sed -i "s/^HOOKS=(.*)/HOOKS=(\$HOOKS)/" /etc/mkinitcpio.conf
     mkinitcpio -P
 
-    # User Setup
     useradd -m -G wheel -s /usr/bin/fish $USERNAME
     echo "$USERNAME:$PASS" | chpasswd
     echo "root:$ROOT_PASS" | chpasswd
     echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/10-shadow
 
-    # App Installation
-    chwd -a
-    for pkg in $APPS; do
-        sudo -u $USERNAME bash -c "export HOME=/home/$USERNAME && yay -S --noconfirm --needed \$pkg" || echo "Failed: \$pkg"
-    done
-
-    # Bootloader
-    MAIN_KERN=\$(echo $KERNEL_LIST | awk '{print \$1}')
     bootctl install
+    MAIN_KERN=\$(echo $KERNEL_LIST | awk '{print \$1}')
     OPTIONS="root=PARTUUID=\$(blkid -s PARTUUID -o value $P2) rw"
-    
-    if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
-        if [[ "$FS_TYPE" == "btrfs" ]]; then
-            OFFSET=\$(btrfs inspect-internal map-swapfile -r /swap/swapfile | awk '{print \$4}')
-            OPTIONS="\$OPTIONS resume=$P2 resume_offset=\$OFFSET"
-        else
-            OPTIONS="\$OPTIONS resume=$P2"
-        fi
-    fi
-
     [[ "$FS_TYPE" == "btrfs" ]] && OPTIONS="\$OPTIONS rootflags=subvol=@"
     echo -e "default arch.conf\ntimeout 3\nconsole-mode max" > /boot/loader/loader.conf
     echo -e "title ShadowOS\nlinux /vmlinuz-\$MAIN_KERN\ninitrd /initramfs-\$MAIN_KERN.img\noptions \$OPTIONS" > /boot/loader/entries/arch.conf
 
-    systemctl enable NetworkManager power-profiles-daemon
+    systemctl enable NetworkManager
     sed -i 's/NOPASSWD: //' /etc/sudoers.d/10-shadow
 EOF
 
-ui_header "ShadowOS Installed!"
+ui_header "Installation Complete! Rebooting now."
