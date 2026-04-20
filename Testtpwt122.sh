@@ -1,8 +1,7 @@
 #!/bin/bash
 set -e
 
-# --- Core Setup ---
-# Force sync immediately for gum/reflector
+# --- Initial Setup ---
 [[ ! -f /usr/bin/gum ]] && pacman -Sy --noconfirm gum reflector
 ui_header() { clear; gum style --foreground 39 --border double --margin "1 1" --padding "1 2" "SHADOWOS: $1"; }
 sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 15/' /etc/pacman.conf
@@ -31,20 +30,21 @@ SWAP_CHOICE=$(gum choose "Both (zRAM + 4GB Swap + Hibernation)" "zRAM Only" "Non
 
 # --- 4. Desktop & Kernels ---
 ui_header "Selection"
-DE_CHOICE=$(gum choose "KDE Plasma" "GNOME" "Cinnamon" "LXQt" "None (CLI)")
-# All kernel options restored
+DE_CHOICE=$(gum choose "no desktop" "kde" "lxqt" "cinnamon" "gnome")
 KERNELS=$(gum choose --no-limit --header "Select Kernels" "linux-fsync-nobara-bin" "linux-zen" "linux-lts" "linux")
 KERNEL_LIST=$(echo "$KERNELS" | tr '\n' ' ')
 
-# --- 5. The Master App List (Staging for Yay -Sy) ---
-CORE_PKGS="base base-devel linux-firmware git fish sudo networkmanager btrfs-progs"
+# --- 5. Mirror Enhancement (AFTER KERNEL PICKING) ---
+ui_header "Mirror Optimization"
+reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
 
-# All requested apps including power-profiles-daemon
+# --- 6. The Master App List ---
+CORE_PKGS="base base-devel linux-firmware git fish sudo networkmanager btrfs-progs"
 ALL_APPS="steam power-profiles-daemon atlauncher-bin faugus-launcher hytale-launcher-bin mangohud protontricks obsidian-bin discord flatpak bazaar spotify lact-git micro fresh fastfetch zen-browser-bin vacuumtube krita-git goverlay heroic-games-launcher-bin protonplus kitty popsicle onlyoffice-bin shelly-bin kate gparted networkmanager"
 
 # --- Execution ---
 clear
-gum style --foreground 196 "STARTING SYNC-FORCED INSTALL ON $DEVICE"
+gum style --foreground 196 "CLEAN INSTALLING SHADOWOS ON $DEVICE"
 gum confirm "Proceed?" || exit 1
 
 # --- Partitioning ---
@@ -85,8 +85,8 @@ else
 fi
 mount "$P1" /mnt/boot
 
-# --- Base Pacstrap (Forced Sync) ---
-pacstrap -Sy /mnt $CORE_PKGS
+# --- CORRECTED Pacstrap (No -Sy flag) ---
+pacstrap -K /mnt $CORE_PKGS
 genfstab -U /mnt >> /mnt/etc/fstab
 
 arch-chroot /mnt /bin/bash <<EOF
@@ -108,22 +108,23 @@ arch-chroot /mnt /bin/bash <<EOF
 
     # Desktop Install (Forced Sync)
     case "$DE_CHOICE" in
-        "KDE Plasma") pacman -Sy --noconfirm plasma-desktop sddm konsole dolphin ;;
-        "GNOME") pacman -Sy --noconfirm gnome gnome-tweaks ;;
-        "Cinnamon") pacman -Sy --noconfirm cinnamon lightdm lightdm-gtk-greeter ;;
-        "LXQt") pacman -Sy --noconfirm lxqt sddm ;;
+        "kde") pacman -Sy --noconfirm plasma-desktop sddm konsole dolphin ;;
+        "gnome") pacman -Sy --noconfirm gnome gnome-tweaks ;;
+        "cinnamon") pacman -Sy --noconfirm cinnamon lightdm lightdm-gtk-greeter ;;
+        "lxqt") pacman -Sy --noconfirm lxqt sddm ;;
+        "no desktop") echo "Skipping DE install" ;;
     esac
 
     # Display Manager Enable
-    [[ "$DE_CHOICE" == "KDE Plasma" || "$DE_CHOICE" == "LXQt" ]] && systemctl enable sddm
-    [[ "$DE_CHOICE" == "GNOME" ]] && systemctl enable gdm
-    [[ "$DE_CHOICE" == "Cinnamon" ]] && systemctl enable lightdm
+    [[ "$DE_CHOICE" == "kde" || "$DE_CHOICE" == "lxqt" ]] && systemctl enable sddm
+    [[ "$DE_CHOICE" == "gnome" ]] && systemctl enable gdm
+    [[ "$DE_CHOICE" == "cinnamon" ]] && systemctl enable lightdm
 
     # Install Yay
     sudo -u $USERNAME bash -c "cd /tmp && git clone https://aur.archlinux.org/yay-bin.git && cd yay-bin && makepkg -si --noconfirm"
 
-    # --- Install Kernels & All Apps via Yay (Forced Sync -Syu) ---
-    sudo -u $USERNAME yay -Syu --noconfirm --needed $KERNEL_LIST $ALL_APPS
+    # --- Install All via Yay (Forced Sync -Sy) ---
+    sudo -u $USERNAME yay -Sy --noconfirm --needed $KERNEL_LIST $ALL_APPS
 
     # Swap/zRAM Setup
     if [[ "$SWAP_CHOICE" == *"Swap"* ]]; then
@@ -162,5 +163,4 @@ arch-chroot /mnt /bin/bash <<EOF
     sed -i 's/NOPASSWD: //' /etc/sudoers.d/10-shadow
 EOF
 
-ui_header "All Synced! ShadowOS is ready."
-
+ui_header "All Synced, Fast, and Corrected! Reboot now."
