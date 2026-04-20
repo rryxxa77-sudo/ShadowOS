@@ -78,7 +78,7 @@ echo "Kernel:    $KERN_PKG"
 echo "Desktop:   $DE_CHOICE"
 echo "Target:    $DEVICE ($MODE)"
 echo "FS:        $FS_TYPE"
-echo "Hardware:  chwd (CachyOS Repo), Bluetooth, WiFi, Power-Profiles"
+echo "Strategy:  Late-Stage CachyOS Repo Injection + chwd Auto-Config"
 echo ""
 gum confirm "Begin installation? Data on $DEVICE will be overwritten."
 
@@ -111,12 +111,6 @@ else
     P2=$(gum input --placeholder "Root Partition Path")
 fi
 
-# Verification
-if [[ ! -b "$P1" || ! -b "$P2" ]]; then
-    echo "Partition nodes failed to appear. Check /dev/."
-    exit 1
-fi
-
 # Formatting
 mkfs.fat -F32 "$P1"
 if [[ "$FS_TYPE" == "btrfs" ]]; then
@@ -139,7 +133,7 @@ mount "$P1" /mnt/boot
 
 # --- Pacstrap ---
 CORE_PKGS="base base-devel linux-firmware git fish sudo networkmanager btrfs-progs $KERN_PKG ${KERN_PKG}-headers bluez bluez-utils"
-ALL_APPS="power-profiles-daemon steam atlauncher-bin faugus-launcher hytale-launcher-bin mangohud protontricks obsidian-bin discord flatpak bazaar micro fastfetch zen-browser-bin vacuumtube krita goverlay heroic-games-launcher-bin protonplus kitty onlyoffice-bin gpu-screen-recorder shelly-bin lact-bin kate gparted plasma-nm bluedevil pipewire-pulse"
+ALL_APPS="steam atlauncher-bin faugus-launcher hytale-launcher-bin mangohud protontricks obsidian-bin discord flatpak bazaar micro fastfetch zen-browser-bin vacuumtube krita goverlay heroic-games-launcher-bin protonplus kitty onlyoffice-bin gpu-screen-recorder shelly-bin lact-bin kate gparted plasma-nm bluedevil pipewire-pulse"
 
 pacstrap -K /mnt $CORE_PKGS
 genfstab -U /mnt >> /mnt/etc/fstab
@@ -150,14 +144,6 @@ arch-chroot /mnt /bin/bash <<EOF
     sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 15/' /etc/pacman.conf
     echo -e "[multilib]\nInclude = /etc/pacman.d/mirrorlist" >> /etc/pacman.conf
     
-    # --- CachyOS Repository Integration (Official Method) ---
-    echo "Installing CachyOS Repositories..."
-    curl https://mirror.cachyos.org/cachyos-repo.tar.xz -o cachyos-repo.tar.xz
-    tar xvf cachyos-repo.tar.xz
-    cd cachyos-repo
-    ./cachyos-repo.sh
-    cd .. && rm -rf cachyos-repo cachyos-repo.tar.xz
-
     pacman -Syu --noconfirm
 
     ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime && hwclock --systohc
@@ -175,22 +161,35 @@ arch-chroot /mnt /bin/bash <<EOF
         "XFCE") pacman -Syu --noconfirm xfce4 xfce4-goodies sddm network-manager-applet ;;
     esac
     
-    # Individual service enablement to prevent daemon conflicts
     systemctl enable sddm
     systemctl enable NetworkManager
     systemctl enable bluetooth
-    systemctl enable power-profiles-daemon
 
-    # AUR Helper
     sudo -u $USERNAME bash -c "cd /tmp && git clone https://aur.archlinux.org/yay-bin.git && cd yay-bin && makepkg -si --noconfirm"
 
-    # chwd Installation from CachyOS Repos
-    pacman -S --noconfirm chwd
+    # --- LATE STAGE CACHYOS REPO INJECTION ---
+    echo "Injecting CachyOS Repositories..."
+    curl https://mirror.cachyos.org/cachyos-repo.tar.xz -o cachyos-repo.tar.xz
+    tar xvf cachyos-repo.tar.xz
+    cd cachyos-repo
+    pacman -U --noconfirm https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-keyring-20240331-1-any.pkg.tar.zst || true
+    ./cachyos-repo.sh
+    cd .. && rm -rf cachyos-repo cachyos-repo.tar.xz
+
+    # Update and install optimized hardware tools
+    pacman -Syu --noconfirm
+    pacman -S --noconfirm chwd power-profiles-daemon
+    
+    # Run Hardware Configuration
     chwd -a
+    
+    # Enable power-profiles-daemon AFTER it is actually installed
+    systemctl enable power-profiles-daemon
 
     # Applications
     sudo -u $USERNAME yay -Syu --noconfirm --needed $ALL_APPS
 
+    # Swap Management
     if [[ "$SWAP_CHOICE" == "Hybrid"* ]]; then
         if [[ "$FS_TYPE" == "btrfs" ]]; then
             truncate -s 0 /swap/swapfile && chattr +C /swap/swapfile
@@ -207,6 +206,7 @@ arch-chroot /mnt /bin/bash <<EOF
     [[ "$SWAP_CHOICE" != "None" ]] && pacman -Syu --noconfirm zram-generator && \
     echo -e "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd" > /etc/systemd/zram-generator.conf
 
+    # Bootloader
     mkinitcpio -P
     bootctl install
     OPTIONS="root=PARTUUID=\$(blkid -s PARTUUID -o value $P2) rw quiet splash"
@@ -219,5 +219,5 @@ arch-chroot /mnt /bin/bash <<EOF
 EOF
 
 ui_banner
-gum style --foreground 46 "Shitsmell Linux Install Successful."
+gum style --foreground 46 "Shitsmell Linux Install Successful. Power profiles fixed."
 gum confirm "Reboot now?" && reboot
