@@ -1,0 +1,160 @@
+#!/bin/bash
+# SHITSMELL LINUX DEPLOYMENT SCRIPT
+set -eo pipefail
+
+# --- 0. Network & Prep ---
+echo "Verifying network connectivity..."
+ping -c 3 archlinux.org >/dev/null 2>&1 || { echo "ERROR: No internet connection."; exit 1; }
+
+echo "Initializing environment..."
+[[ ! -f /usr/bin/gum ]] && pacman -Syu --noconfirm gum reflector
+reflector --latest 20 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
+sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 15/' /etc/pacman.conf
+
+ui_banner() {
+    clear
+    gum style --foreground 39 --border double --margin "1 1" --padding "1 2" --align center \
+        "Shitsmell Linux"
+}
+
+# --- 1. System Configuration ---
+ui_banner
+USERNAME=$(gum input --placeholder "Username")
+PASS=$(gum input --password --placeholder "User Password")
+ROOT_PASS=$(gum input --password --placeholder "Root Password (leave blank to sync)")
+[[ -z "$ROOT_PASS" ]] && ROOT_PASS="$PASS"
+HOSTNAME="shitsmell"
+
+ui_banner
+LOCALE=$(grep "UTF-8" /etc/locale.gen | sed 's/^#//' | awk '{print $1}' | gum filter --placeholder "Select System Locale")
+LOCALE_ESC="${LOCALE//./\\.}"
+TIMEZONE=$(timedatectl list-timezones | gum filter --placeholder "Select Timezone")
+KERN_PKG=$(gum choose "linux-zen" "linux" "linux-lts")
+FS_TYPE=$(gum choose "ext4" "btrfs")
+DE_CHOICE=$(gum choose "KDE Plasma" "GNOME" "XFCE" "Cinnamon" "Budgie" "MATE" "LXQt")
+
+# --- 2. Hardware & Storage ---
+grep -q "GenuineIntel" /proc/cpuinfo && UCODE="intel-ucode" || UCODE="amd-ucode"
+DEVICE=$(lsblk -dno NAME,SIZE,MODEL | grep -v "loop" | gum filter --placeholder "Select target installation drive")
+DEVICE="/dev/$(echo $DEVICE | awk '{print $1}')"
+
+gum confirm "This will destroy all data on $DEVICE. Proceed?" || exit 1
+
+# --- 3. Partitioning (2GB EFI) ---
+echo "Applying partition table..."
+sgdisk -Z "$DEVICE"
+sgdisk -n 1:0:+2G -t 1:ef00 "$DEVICE"
+sgdisk -n 2:0:0 -t 2:8304 "$DEVICE"
+partprobe "$DEVICE" && sleep 3
+
+if [[ "$DEVICE" == *"nvme"* || "$DEVICE" == *"mmcblk"* ]]; then
+    P1="${DEVICE}p1"; P2="${DEVICE}p2"
+else
+    P1="${DEVICE}1"; P2="${DEVICE}2"
+fi
+
+# --- 4. Filesystem Deployment ---
+echo "Formatting and mounting volumes..."
+mkfs.fat -F32 "$P1"
+if [[ "$FS_TYPE" == "btrfs" ]]; then
+    mkfs.btrfs -f "$P2"
+    mount "$P2" /mnt
+    btrfs subvolume create /mnt/@
+    btrfs subvolume create /mnt/@home
+    umount /mnt
+    mount -o subvol=@,noatime,compress=zstd:3 "$P2" /mnt
+    mkdir -p /mnt/{home,boot}
+    mount -o subvol=@home,noatime,compress=zstd:3 "$P2" /mnt/home
+else
+    mkfs.ext4 -F "$P2"
+    mount "$P2" /mnt
+    mkdir -p /mnt/boot
+fi
+mount "$P1" /mnt/boot
+
+# --- 5. Base Installation ---
+echo "Executing pacstrap..."
+pacstrap -K /mnt base base-devel linux-firmware git fish sudo networkmanager $KERN_PKG ${KERN_PKG}-headers $UCODE bluez bluez-utils
+genfstab -U /mnt >> /mnt/etc/fstab
+
+# --- 6. System Personalization (Chroot) ---
+arch-chroot /mnt /bin/bash <<EOF
+    set -eo pipefail
+    
+    # Mirror & Keyring Initialization
+    pacman-key --init && pacman-key --populate archlinux
+    sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 15/' /etc/pacman.conf
+    echo -e "[multilib]\nInclude = /etc/pacman.d/mirrorlist" >> /etc/pacman.conf
+    pacman -Syu --noconfirm
+
+    # Regional Settings
+    ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime && hwclock --systohc
+    sed -i "s/#$LOCALE_ESC/$LOCALE/" /etc/locale.gen && locale-gen
+    echo "LANG=$LOCALE" > /etc/locale.conf && echo "KEYMAP=us" > /etc/vconsole.conf
+    echo "$HOSTNAME" > /etc/hostname
+    echo -e "127.0.0.1\tlocalhost\n::1\t\tlocalhost\n127.0.1.1\t$HOSTNAME.localdomain\t$HOSTNAME" > /etc/hosts
+
+    # User Provisioning
+    useradd -m -G wheel -s /usr/bin/fish $USERNAME
+    printf '%s:%s\n' "$USERNAME" "$PASS" | chpasswd
+    printf 'root:%s\n' "$ROOT_PASS" | chpasswd
+    echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/10-shadow
+
+    # Desktop Environment Selection
+    echo "Deploying $DE_CHOICE..."
+    case "$DE_CHOICE" in
+        "KDE Plasma") pacman -S --noconfirm plasma-desktop sddm konsole dolphin plasma-nm bluedevil; DM="sddm" ;;
+        "GNOME") pacman -S --noconfirm gnome gnome-tweaks gdm; DM="gdm" ;;
+        "XFCE") pacman -S --noconfirm xfce4 xfce4-goodies sddm; DM="sddm" ;;
+        "Cinnamon") pacman -S --noconfirm cinnamon sddm nemo; DM="sddm" ;;
+        "Budgie") pacman -S --noconfirm budgie sddm; DM="sddm" ;;
+        "MATE") pacman -S --noconfirm mate mate-extra sddm; DM="sddm" ;;
+        "LXQt") pacman -S --noconfirm lxqt sddm; DM="sddm" ;;
+    esac
+    systemctl enable \$DM NetworkManager bluetooth
+
+    # --- CachyOS Repository Integration ---
+    echo "Configuring optimized repositories..."
+    curl -O https://mirror.cachyos.org/cachyos-repo.tar.xz
+    tar xvf cachyos-repo.tar.xz && cd cachyos-repo
+    sed -i 's/pacman -Sy/pacman --noconfirm -Sy/g' cachyos-repo.sh
+    sed -i 's/pacman -S/pacman --noconfirm -S/g' cachyos-repo.sh
+    yes | ./cachyos-repo.sh || true
+    cd .. && rm -rf cachyos-repo*
+
+    # Performance & Optimization Tweak
+    pacman -Syu --noconfirm
+    pacman -S --noconfirm chwd power-profiles-daemon zram-generator
+    chwd -a || true
+    systemctl enable power-profiles-daemon
+    echo -e "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd" > /etc/systemd/zram-generator.conf
+
+    # --- AUR & Application Suite ---
+    echo "Building AUR helper and deploying applications..."
+    su - $USERNAME -c "cd /tmp && git clone https://aur.archlinux.org/yay-bin.git && cd yay-bin && makepkg -si --noconfirm"
+    su - $USERNAME -c "yay -S --noconfirm --needed steam atlauncher-bin faugus-launcher hytale-launcher-bin mangohud protontricks obsidian-bin discord flatpak bazaar micro fastfetch zen-browser-bin vacuumtube krita goverlay heroic-games-launcher-bin protonplus kitty onlyoffice-bin gpu-screen-recorder shelly-bin lact-bin kate gparted pipewire-pulse || true"
+    flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+    # --- Bootloader Configuration ---
+    echo "Finalizing EFI binaries..."
+    bootctl install
+    echo -e "default arch.conf\ntimeout 3\nconsole-mode max" > /boot/loader/loader.conf
+    ROOT_UUID=\$(blkid -s PARTUUID -o value $P2)
+    [[ "$FS_TYPE" == "btrfs" ]] && OPTIONS="root=PARTUUID=\$ROOT_UUID rootflags=subvol=@ rw quiet" || OPTIONS="root=PARTUUID=\$ROOT_UUID rw quiet"
+
+    cat <<EOT > /boot/loader/entries/arch.conf
+title   Shitsmell Linux
+linux   /vmlinuz-$KERN_PKG
+initrd  /$UCODE.img
+initrd  /initramfs-$KERN_PKG.img
+options \$OPTIONS
+EOT
+
+    mkinitcpio -P && bootctl update
+    sed -i 's/NOPASSWD: //' /etc/sudoers.d/10-shadow
+EOF
+
+ui_banner
+gum style --foreground 46 "Shitsmell Linux has been successfully installed."
+gum confirm "Reboot system?" && reboot
+
