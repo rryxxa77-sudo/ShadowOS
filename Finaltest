@@ -32,15 +32,16 @@ SWAP_CHOICE=$(gum choose "Both (zRAM + 4GB Swap + Hibernation)" "zRAM Only" "Non
 ui_header "Mirror Optimization"
 reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
 
-# --- 5. App List (Cleaned) ---
-# Removed Spotify & Nobara Kernel to avoid PGP/Build failures
+# --- 5. Clean Binary App List (No Compiling) ---
 CORE_PKGS="base base-devel linux-firmware git fish sudo networkmanager btrfs-progs linux-zen linux-zen-headers"
-ALL_APPS="steam power-profiles-daemon atlauncher-bin faugus-launcher hytale-launcher-bin mangohud protontricks obsidian-bin discord flatpak bazaar micro fastfetch zen-browser-bin vacuumtube krita-git goverlay heroic-games-launcher-bin protonplus kitty popsicle onlyoffice-bin shelly-bin kate gparted"
+
+# ALL BINARY: Swapped krita-git -> krita | lact-git -> lact-bin
+ALL_APPS="steam power-profiles-daemon atlauncher-bin faugus-launcher hytale-launcher-bin mangohud protontricks obsidian-bin discord flatpak bazaar micro fastfetch zen-browser-bin vacuumtube krita goverlay heroic-games-launcher-bin protonplus kitty popsicle onlyoffice-bin gpu-screen-recorder shelly-bin lact-bin kate gparted"
 
 # --- Execution ---
 clear
-gum style --foreground 196 "CLEAN INSTALLING SHADOWOS (ZEN EDITION) ON $DEVICE"
-gum confirm "Proceed?" || exit 1
+gum style --foreground 196 "DEPLOYING SHADOWOS BINARY EDITION ON $DEVICE"
+gum confirm "Proceed with no-compile install?" || exit 1
 
 # --- Partitioning ---
 if [[ "$MODE" == "Wipe (2GB EFI)" ]]; then
@@ -60,7 +61,6 @@ else
     P2=$(gum input --placeholder "Enter Root Partition Path")
 fi
 
-# Formatting
 mkfs.fat -F32 "$P1"
 if [[ "$FS_TYPE" == "btrfs" ]]; then
     mkfs.btrfs -f "$P2"
@@ -80,13 +80,13 @@ else
 fi
 mount "$P1" /mnt/boot
 
-# --- Pacstrap (Zen included here) ---
+# --- Pacstrap ---
 pacstrap -K /mnt $CORE_PKGS
 genfstab -U /mnt >> /mnt/etc/fstab
 
 arch-chroot /mnt /bin/bash <<EOF
     set -e
-    # Fix keys immediately
+    # Fix keys
     pacman-key --init
     pacman-key --populate archlinux
     pacman -Sy --noconfirm
@@ -110,7 +110,7 @@ arch-chroot /mnt /bin/bash <<EOF
     # Install Yay
     sudo -u $USERNAME bash -c "cd /tmp && git clone https://aur.archlinux.org/yay-bin.git && cd yay-bin && makepkg -si --noconfirm"
 
-    # --- Install Apps (Forced Sync) ---
+    # --- Install All via Yay (Forced Sync -Sy) ---
     sudo -u $USERNAME yay -Sy --noconfirm --needed $ALL_APPS
 
     # Swap/zRAM
@@ -149,4 +149,4 @@ arch-chroot /mnt /bin/bash <<EOF
     sed -i 's/NOPASSWD: //' /etc/sudoers.d/10-shadow
 EOF
 
-ui_header "Zen Edition Deployed. No PGP errors this time."
+ui_header "Binary Deployment Complete. REBOOT NOW!"
