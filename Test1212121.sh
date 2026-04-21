@@ -7,7 +7,7 @@ echo "Verifying network connectivity..."
 ping -c 3 archlinux.org >/dev/null 2>&1 || { echo "ERROR: No internet."; exit 1; }
 
 echo "Initializing environment..."
-[[ ! -f /usr/bin/gum ]] && pacman -Syu --noconfirm gum reflector
+[[ ! -f /usr/bin/gum ]] && pacman -Sy --noconfirm gum reflector
 reflector --latest 20 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
 sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 15/' /etc/pacman.conf
 
@@ -202,7 +202,7 @@ EOT
 
     # 3. Flatpak Setup
     flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-    flatpak install -y flathub com.dec05eba.gpu_screen_recorder org.bottlesdev.Bottles org.kde.Platform//6.10 io.qt.qtwebengine.BaseApp//6.10
+    flatpak install -y flathub com.dec05eba.gpu_screen_recorder com.usebottles.bottles org.kde.Platform//6.10 io.qt.qtwebengine.BaseApp//6.10
 
     # 4. Trinity Launcher
     flatpak remote-add --if-not-exists trinity https://github.com/Trinity-LA/Trinity-Launcher/releases/download/flatpak/com.trench.trinity.launcher.flatpakrepo
