@@ -116,12 +116,20 @@ arch-chroot /mnt /bin/bash <<EOF
     sed -i "s/#$LOCALE_ESC/$LOCALE/" /etc/locale.gen && locale-gen
     echo "LANG=$LOCALE" > /etc/locale.conf && echo "KEYMAP=us" > /etc/vconsole.conf
     echo "$HOSTNAME" > /etc/hostname
+    # Set OS Name in os-release
+    sed -i 's/^NAME=.*/NAME="Shitsmell Linux"/' /etc/os-release
+    sed -i 's/^PRETTY_NAME=.*/PRETTY_NAME="Shitsmell Linux"/' /etc/os-release
+
+    # Optional: Change the lsb-release as well for compatibility
+    echo "DISTRIB_ID=Shitsmell" > /etc/lsb-release
+    echo "DISTRIB_RELEASE=rolling" >> /etc/lsb-release
+    echo "DISTRIB_DESCRIPTION=\"Shitsmell Linux\"" >> /etc/lsb-release
     echo -e "127.0.0.1\tlocalhost\n::1\t\tlocalhost\n127.0.1.1\t$HOSTNAME.localdomain\t$HOSTNAME" > /etc/hosts
 
     useradd -m -G wheel -s /usr/bin/fish $USERNAME
     printf '%s:%s\n' "$USERNAME" "$PASS" | chpasswd
     printf 'root:%s\n' "$ROOT_PASS" | chpasswd
-    echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/10-shadow
+    echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/10-shadow && chmod 440 /etc/sudoers.d/10-shadow
 
     case "$DE_CHOICE" in
         "KDE Plasma") pacman -S --noconfirm plasma-desktop sddm konsole dolphin plasma-nm bluedevil; DM="sddm" ;;
@@ -174,7 +182,33 @@ options \$OPTS
 EOT
 
     mkinitcpio -P && bootctl update
-    sed -i 's/NOPASSWD: //' /etc/sudoers.d/10-shadow
+    # (Existing bootloader commands)
+    mkinitcpio -P && bootctl update
+
+    # ---Finishing Install & QoL ---
+    # 1. Configure Fish (No Greeting + Auto-Fastfetch)
+    mkdir -p /etc/skel/.config/fish
+    echo -e "set -g fish_greeting\nfastfetch" > /etc/skel/.config/fish/config.fish
+
+    # 2. Apply to primary user
+    mkdir -p /home/$USERNAME/.config/fish
+    cp /etc/skel/.config/fish/config.fish /home/$USERNAME/.config/fish/config.fish
+    chown -R $USERNAME:$USERNAME /home/$USERNAME/.config/fish
+
+    # 2. Gaming & System Apps
+    su - $USERNAME -c "yay -S --noconfirm plasma-pa lact proton-vpn-gtk-app lutris opengamepadui-bin filelight arch-update cachyos-hello"
+
+    # 3. Flatpak Setup
+    flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+    flatpak install -y flathub com.dec05eba.gpu_screen_recorder org.bottlesdev.Bottles org.kde.Platform//6.10 io.qt.qtwebengine.BaseApp//6.10
+
+    # 4. Trinity Launcher
+    flatpak remote-add --if-not-exists trinity https://github.com/Trinity-LA/Trinity-Launcher/releases/download/flatpak/com.trench.trinity.launcher.flatpakrepo
+    flatpak install -y trinity com.trench.trinity.launcher
+
+    # 5. Enable Hardware Daemons
+    systemctl enable lactd
+
 EOF
 
 ui_banner
