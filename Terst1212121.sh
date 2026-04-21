@@ -142,7 +142,7 @@ arch-chroot /mnt /bin/bash <<EOF
     esac
     systemctl enable \$DM NetworkManager bluetooth
 
-    # --- FIX: Ensure flatpak is installed before using it ---
+    # FIX: Install flatpak via pacman for reliability
     pacman -S --noconfirm flatpak
 
     # CachyOS Integration
@@ -160,10 +160,15 @@ arch-chroot /mnt /bin/bash <<EOF
     systemctl enable power-profiles-daemon
     echo -e "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd" > /etc/systemd/zram-generator.conf
 
-    # AUR & Apps
+    # FIX: Split AUR & Apps to prevent script crash on single build failure
     su - $USERNAME -c "cd /tmp && git clone https://aur.archlinux.org/yay-bin.git && cd yay-bin && makepkg -si --noconfirm"
-    su - $USERNAME -c "yay -S --noconfirm --needed steam atlauncher-bin faugus-launcher hytale-launcher-bin mangohud protontricks obsidian-bin discord bazaar micro fastfetch zen-browser-bin vacuumtube krita goverlay heroic-games-launcher-bin protonplus kitty onlyoffice-bin gpu-screen-recorder shelly-bin lact-bin kate gparted pipewire-pulse || true"
     
+    # Chunk 1: Repo apps (highly reliable)
+    su - $USERNAME -c "yay -S --noconfirm --needed steam mangohud micro fastfetch vacuumtube krita kitty kate gparted pipewire-pulse"
+    
+    # Chunk 2: AUR apps (potential failure points, protected by || true)
+    su - $USERNAME -c "yay -S --noconfirm obsidian-bin discord zen-browser-bin heroic-games-launcher-bin onlyoffice-bin lact-bin atlauncher-bin faugus-launcher hytale-launcher-bin protontricks goverlay protonplus gpu-screen-recorder shelly-bin || true"
+
     # Bootloader
     bootctl install
     echo -e "default arch.conf\ntimeout 3\nconsole-mode max" > /boot/loader/loader.conf
@@ -184,31 +189,27 @@ options \$OPTS
 EOT
 
     mkinitcpio -P && bootctl update
-    # (Existing bootloader commands)
-    mkinitcpio -P && bootctl update
+    # (Duplicate removed)
 
     # ---Finishing Install & QoL ---
-    # 1. Configure Fish (No Greeting + Auto-Fastfetch)
     mkdir -p /etc/skel/.config/fish
     echo -e "set -g fish_greeting\nfastfetch" > /etc/skel/.config/fish/config.fish
 
-    # 2. Apply to primary user
     mkdir -p /home/$USERNAME/.config/fish
     cp /etc/skel/.config/fish/config.fish /home/$USERNAME/.config/fish/config.fish
     chown -R $USERNAME:$USERNAME /home/$USERNAME/.config/fish
 
-    # 2. Gaming & System Apps
-    su - $USERNAME -c "yay -S --noconfirm plasma-pa lact proton-vpn-gtk-app lutris opengamepadui-bin filelight arch-update cachyos-hello"
+    # Remaining System/Gaming Apps
+    su - $USERNAME -c "yay -S --noconfirm plasma-pa lact proton-vpn-gtk-app lutris opengamepadui-bin filelight arch-update cachyos-hello || true"
 
-    # 3. Flatpak Setup
+    # Flatpak Setup
     flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
     flatpak install -y flathub com.dec05eba.gpu_screen_recorder com.usebottles.bottles org.kde.Platform//6.10 io.qt.qtwebengine.BaseApp//6.10
 
-    # 4. Trinity Launcher
+    # Trinity Launcher
     flatpak remote-add --if-not-exists trinity https://github.com/Trinity-LA/Trinity-Launcher/releases/download/flatpak/com.trench.trinity.launcher.flatpakrepo
     flatpak install -y trinity com.trench.trinity.launcher
 
-    # 5. Enable Hardware Daemons
     systemctl enable lactd
 
 EOF
