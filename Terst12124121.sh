@@ -65,7 +65,6 @@ fi
 # --- 3. Formatting & Mounting ---
 gum confirm "Format target partitions now?" || exit 1
 
-# Preservation Logic: Only format EFI if we are wiping the disk or setting up manually
 if [[ "$STRATEGY" != "Replace Partition" ]]; then
     mkfs.fat -F32 "$P1"
 fi
@@ -116,14 +115,11 @@ arch-chroot /mnt /bin/bash <<EOF
     sed -i "s/#$LOCALE_ESC/$LOCALE/" /etc/locale.gen && locale-gen
     echo "LANG=$LOCALE" > /etc/locale.conf && echo "KEYMAP=us" > /etc/vconsole.conf
     echo "$HOSTNAME" > /etc/hostname
-    # Set OS Name in os-release
+    
     sed -i 's/^NAME=.*/NAME="Shitsmell Linux"/' /etc/os-release
     sed -i 's/^PRETTY_NAME=.*/PRETTY_NAME="Shitsmell Linux"/' /etc/os-release
 
-    # Optional: Change the lsb-release as well for compatibility
-    echo "DISTRIB_ID=Shitsmell" > /etc/lsb-release
-    echo "DISTRIB_RELEASE=rolling" >> /etc/lsb-release
-    echo "DISTRIB_DESCRIPTION=\"Shitsmell Linux\"" >> /etc/lsb-release
+    # FIX: Removed manual lsb-release creation to prevent pacman file conflicts
     echo -e "127.0.0.1\tlocalhost\n::1\t\tlocalhost\n127.0.1.1\t$HOSTNAME.localdomain\t$HOSTNAME" > /etc/hosts
 
     useradd -m -G wheel -s /usr/bin/fish $USERNAME
@@ -142,7 +138,7 @@ arch-chroot /mnt /bin/bash <<EOF
     esac
     systemctl enable \$DM NetworkManager bluetooth
 
-    # FIX: Install flatpak via pacman for reliability
+    # FIX: Ensure flatpak is installed for subsequent commands
     pacman -S --noconfirm flatpak
 
     # CachyOS Integration
@@ -160,13 +156,13 @@ arch-chroot /mnt /bin/bash <<EOF
     systemctl enable power-profiles-daemon
     echo -e "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd" > /etc/systemd/zram-generator.conf
 
-    # FIX: Split AUR & Apps to prevent script crash on single build failure
+    # AUR & Apps - Split into chunks to handle AUR build failures
     su - $USERNAME -c "cd /tmp && git clone https://aur.archlinux.org/yay-bin.git && cd yay-bin && makepkg -si --noconfirm"
     
-    # Chunk 1: Repo apps (highly reliable)
+    # Official Repo apps (Highly reliable)
     su - $USERNAME -c "yay -S --noconfirm --needed steam mangohud micro fastfetch vacuumtube krita kitty kate gparted pipewire-pulse"
     
-    # Chunk 2: AUR apps (potential failure points, protected by || true)
+    # AUR apps (Using || true to ensure the script completes even if a build fails)
     su - $USERNAME -c "yay -S --noconfirm obsidian-bin discord zen-browser-bin heroic-games-launcher-bin onlyoffice-bin lact-bin atlauncher-bin faugus-launcher hytale-launcher-bin protontricks goverlay protonplus gpu-screen-recorder shelly-bin || true"
 
     # Bootloader
@@ -189,17 +185,14 @@ options \$OPTS
 EOT
 
     mkinitcpio -P && bootctl update
-    # (Duplicate removed)
 
     # ---Finishing Install & QoL ---
     mkdir -p /etc/skel/.config/fish
     echo -e "set -g fish_greeting\nfastfetch" > /etc/skel/.config/fish/config.fish
-
     mkdir -p /home/$USERNAME/.config/fish
     cp /etc/skel/.config/fish/config.fish /home/$USERNAME/.config/fish/config.fish
     chown -R $USERNAME:$USERNAME /home/$USERNAME/.config/fish
 
-    # Remaining System/Gaming Apps
     su - $USERNAME -c "yay -S --noconfirm plasma-pa lact proton-vpn-gtk-app lutris opengamepadui-bin filelight arch-update cachyos-hello || true"
 
     # Flatpak Setup
